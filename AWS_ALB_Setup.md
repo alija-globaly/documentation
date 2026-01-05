@@ -37,12 +37,12 @@ aws ec2 describe-subnets \
   --output table
 ```
 
-
-
 # Set at least two subnets in different AZs:
+```bash
 export SUBNET_1="subnet-xxxxxxxx"
 export SUBNET_2="subnet-yyyyyyyy"
 ```
+
 Tag them:
 ```bash
 aws ec2 create-tags \
@@ -52,8 +52,7 @@ aws ec2 create-tags \
     Key=kubernetes.io/role/elb,Value=1 \
   --region $AWS_REGION
 
-
-Verify:
+# Verify:
 aws ec2 describe-subnets \
   --subnet-ids $SUBNET_1 $SUBNET_2 \
   --query 'Subnets[*].[SubnetId,Tags[?Key==`kubernetes.io/role/elb`].Value|[0]]' \
@@ -77,9 +76,11 @@ export SG_ID="sg-xxxxxxxx"  # Your security group ID
 # HTTP
 aws ec2 authorize-security-group-ingress \
   --group-id $SG_ID --protocol tcp --port 80 --cidr 0.0.0.0/0 --region $AWS_REGION
+
 # HTTPS
 aws ec2 authorize-security-group-ingress \
   --group-id $SG_ID --protocol tcp --port 443 --cidr 0.0.0.0/0 --region $AWS_REGION
+
 # NodePort range (CRITICAL)
 aws ec2 authorize-security-group-ingress \
   --group-id $SG_ID --protocol tcp --port 30000-32767 --cidr 0.0.0.0/0 --region $AWS_REGION
@@ -98,7 +99,6 @@ aws ec2 describe-instances \
   --query 'Reservations[0].Instances[0].MetadataOptions' \
   --region $AWS_REGION
 
-
 # If not configured, set IMDS with the proper hop limit:
 aws ec2 modify-instance-metadata-options \
   --instance-id $INSTANCE_ID \
@@ -112,7 +112,6 @@ aws ec2 modify-instance-metadata-options \
 # IMDSv2 test
 TOKEN=$(curl -X PUT "http://169.254.169.254/latest/api/token" \
   -H "X-aws-ec2-metadata-token-ttl-seconds: 21600")
-
 
 curl -H "X-aws-ec2-metadata-token: $TOKEN" \
   http://169.254.169.254/latest/meta-data/instance-id
@@ -163,14 +162,10 @@ aws iam create-role \
   --role-name K8sALBControllerRole \
   --assume-role-policy-document file://ec2-trust-policy.json
 
-
 # Attach ALB controller policy to role
 aws iam attach-role-policy \
   --role-name K8sALBControllerRole \
   --policy-arn $ALB_POLICY_ARN
-
-
-
 
 # Attach EC2 read permissions (optional)
 aws iam attach-role-policy \
@@ -217,9 +212,7 @@ SSH to EACH Kubernetes node and run:
 # Get instance metadata using IMDSv2
 TOKEN=$(curl -X PUT "http://169.254.169.254/latest/api/token" -H "X-aws-ec2-metadata-token-ttl-seconds: 21600")
 
-
 INSTANCE_ID=$(curl -H "X-aws-ec2-metadata-token: $TOKEN" -s http://169.254.169.254/latest/meta-data/instance-id)
-
 
 AZ=$(curl -H "X-aws-ec2-metadata-token: $TOKEN" -s http://169.254.169.254/latest/meta-data/placement/availability-zone)
 
@@ -227,11 +220,9 @@ AZ=$(curl -H "X-aws-ec2-metadata-token: $TOKEN" -s http://169.254.169.254/latest
 # Get node name
 NODE_NAME=$(kubectl get nodes -o wide | grep $(hostname -I | awk '{print $1}') | awk '{print $1}')
 
-
 echo "Instance ID: $INSTANCE_ID"
 echo "Availability Zone: $AZ"
 echo "Node Name: $NODE_NAME"
-
 
 # Add providerID
 kubectl patch node $NODE_NAME \
@@ -251,7 +242,6 @@ curl -L -o cert-manager.yaml https://github.com/cert-manager/cert-manager/releas
 
 # Apply cert-manager manifests
 kubectl apply -f cert-manager.yaml
-
 
 # Verify cert-manager pods:
 kubectl get pods -n cert-manager
@@ -277,17 +267,14 @@ hostNetwork=true is required for self-hosted Kubernetes to allow controller pods
 # Check deployment
 kubectl get deployment -n kube-system aws-load-balancer-controller
 
-
 # Check pods
 kubectl get pods -n kube-system -l app.kubernetes.io/name=aws-load-balancer-controller
-
 
 # Check logs for errors
 kubectl logs -n kube-system deployment/aws-load-balancer-controller --tail=50
 ```
 
 ### 5.4 Create IngressClass
-
 ```bash
 cat <<EOF > alb-ingress-class.yaml
 apiVersion: networking.k8s.io/v1
@@ -300,12 +287,8 @@ spec:
   controller: ingress.k8s.aws/alb
 EOF
 
-
-
-
 #Apply the manifest:
 kubectl apply -f alb-ingress-class.yaml 
-
 
 # Verify 
 kubectl get ingressclass
@@ -313,18 +296,170 @@ kubectl get ingressclass
 ---
 
 
+## Phase 6: Deploy Test Application
+### 6.1 Create Demo Application
+```bash
+# Create namespace
+kubectl create namespace demo
+
+
+# Create deployment and service
+cat <<EOF > deployment.yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: nginx
+  namespace: demo
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: nginx
+  template:
+    metadata:
+      labels:
+        app: nginx
+    spec:
+      containers:
+      - name: nginx
+        image: nginx:latest
+        ports:
+        - containerPort: 80
+        resources:
+          requests:
+            cpu: 100m
+            memory: 128Mi
+          limits:
+            cpu: 250m
+            memory: 256Mi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: nginx
+  namespace: demo
+spec:
+  type: NodePort
+  selector:
+    app: nginx
+  ports:
+  - port: 80
+    targetPort: 80
+EOF
+
+
+# Apply the manifest:
+kubectl apply -f deployment.yaml 
+
+# Verify:
+kubectl get pods -n demo
+kubectl get svc -n demo
+
+
+```
+
+
+### 6.2 Create Ingress
+```bash
+cat <<EOF > ingress.yaml
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: nginx-ingress
+  namespace: demo
+  annotations:
+    kubernetes.io/ingress.class: alb
+    alb.ingress.kubernetes.io/scheme: internet-facing
+    alb.ingress.kubernetes.io/load-balancer-name: demo-aws-elb
+    alb.ingress.kubernetes.io/target-type: instance
+    alb.ingress.kubernetes.io/listen-ports: '[{"HTTP":80}]'
+    alb.ingress.kubernetes.io/healthcheck-path: /
+    alb.ingress.kubernetes.io/healthcheck-interval-seconds: "30"
+    alb.ingress.kubernetes.io/healthcheck-timeout-seconds: "5"
+    alb.ingress.kubernetes.io/healthy-threshold-count: "2"
+    alb.ingress.kubernetes.io/unhealthy-threshold-count: "2"
+    alb.ingress.kubernetes.io/success-codes: "200-499"
+    alb.ingress.kubernetes.io/tags: Environment=demo,Application=nginx
+spec:
+  ingressClassName: alb
+  rules:
+    - http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: nginx
+                port:
+                  number: 80
+EOF 
+
+
+# Apply the manifest:
+kubectl apply -f ingress.yaml
+
+
+# Verify:
+kubectl get ingress -n demo
+```
+
+### 6.3 Verify ALB and Targets
+```bash
+# List ALBs
+aws elbv2 describe-load-balancers \
+  --region $AWS_REGION \
+  --query 'LoadBalancers[*].{Name:LoadBalancerName,DNS:DNSName,State:State.Code}' \
+  --output table
+
+
+# Get target group
+TG_ARN=$(aws elbv2 describe-target-groups \
+  --region $AWS_REGION \
+  --query 'TargetGroups[?contains(TargetGroupName, `k8s-demo-nginx`)].TargetGroupArn' \
+  --output text)
+
+
+# Check target health
+aws elbv2 describe-target-health \
+  --target-group-arn $TG_ARN \
+  --region $AWS_REGION
+
+```
 
 
 
+### 6.3 Test Application
+```bash
+# Get ALB DNS name
+ALB_DNS=$(kubectl get ingress testing-nginx-ingress -n demo -o jsonpath='{.status.loadBalancer.ingress[0].hostname}')
 
 
+echo "ALB URL: http://$ALB_DNS"
 
 
+# Test with curl
+curl http://$ALB_DNS
+```
+Expected result: NGINX welcome page
+
+---
 
 
+## References
+https://aws.amazon.com/blogs/containers/exposing-kubernetes-applications-part-2-aws-load-balancer-controller/
+
+https://kubernetes-sigs.github.io/aws-load-balancer-controller/v2.7/deploy/installation/
 
 
+https://kubernetes-sigs.github.io/aws-load-balancer-controller/v1.1/
 
+
+https://okeyebereblessing.medium.com/configuring-an-ingress-controller-with-aws-load-balancer-in-kubernetes-kubeadm-2a0f625e9952
+
+
+https://devopscube.com/aws-cloud-controller-manager/
+
+https://medium.com/@anil.goyal0057/understanding-aws-alb-ingress-controller-in-kubernetes-end-to-end-request-flow-f8b8a7435559
 
 
 
