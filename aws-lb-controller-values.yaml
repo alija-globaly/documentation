@@ -1,0 +1,92 @@
+clusterName: prod-k8s-cluster
+region: ap-southeast-2
+vpcId: vpc-26227943
+
+serviceAccount:
+  create: true
+  automountServiceAccountToken: true
+
+hostNetwork: true
+dnsPolicy: ClusterFirstWithHostNet
+
+replicaCount: 1
+
+revisionHistoryLimit: 10
+
+terminationGracePeriodSeconds: 10
+
+resources:
+  requests:
+    cpu: 200m
+    memory: 256Mi
+  limits:
+    cpu: 500m
+    memory: 512Mi
+
+defaultTargetType: instance
+
+ingressClass: alb
+ingressClassConfig:
+  default: false
+
+# Performance tuning
+ingressMaxConcurrentReconciles: 3
+serviceMaxConcurrentReconciles: 3
+targetgroupbindingMaxConcurrentReconciles: 1
+
+syncPeriod:
+
+livenessProbe:
+  failureThreshold: 3  
+  initialDelaySeconds: 30
+  timeoutSeconds: 10
+  periodSeconds: 10
+
+readinessProbe:
+  failureThreshold: 2
+  httpGet:
+    path: /readyz
+    port: 61779
+    scheme: HTTP
+  successThreshold: 1
+  initialDelaySeconds: 10
+  timeoutSeconds: 10
+
+podSecurityContext:
+  fsGroup: 65534
+
+securityContext:
+  readOnlyRootFilesystem: true
+  runAsNonRoot: true
+  allowPrivilegeEscalation: false
+
+priorityClassName: system-cluster-critical
+
+podDisruptionBudget:
+  maxUnavailable: 1
+
+updateStrategy:
+  type: RollingUpdate
+  rollingUpdate:
+    maxSurge: 1
+    maxUnavailable: 0 
+
+serviceMonitor:
+  enabled: false
+  namespace:
+  additionalLabels: {}
+  interval: 1m
+  scrapeTimeout:
+  relabelings:
+  metricRelabelings:
+
+webhookConfig:
+  disableIngressValidation:
+
+enableServiceMutatorWebhook: true
+
+serviceMutatorWebhookConfig:
+  failurePolicy: Fail
+
+podMutatorWebhookConfig:
+  failurePolicy: Ignore
