@@ -75,17 +75,18 @@ Subdomain resolution is managed via Cloudflare using a wildcard DNS record. CNAM
 
 
 ```bash
-User Browser <br>
-&nbsp;&nbsp;&nbsp;&nbsp;      │
-tenant.agentcis.com <br>
-&nbsp;&nbsp;&nbsp;&nbsp;      │
-Cloudflare DNS (CNAME ➔ ALB DNS) <br>
-&nbsp;&nbsp;&nbsp;&nbsp;      │
-ALB Listeners (HTTP/HTTPS) ➔ Rules & Priority ➔ Target Groups <br>
-&nbsp;&nbsp;&nbsp;&nbsp;      │
-EC2 Instances (Frontend + Backend) <br>
-&nbsp;&nbsp;&nbsp;&nbsp;      │
-Microservice calls ➔ K8s Pods
+User Browser
+      ↓
+tenant.agentcis.com
+      ↓
+Cloudflare DNS (CNAME → ALB DNS)
+      ↓
+ALB Listeners (HTTP/HTTPS) → Rules & Priority → Target Groups
+      ↓
+EC2 Instances (Frontend + Backend)
+      ↓
+Microservice calls → K8s Pods
+
 
 ```
 
