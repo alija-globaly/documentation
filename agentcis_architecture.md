@@ -4,7 +4,7 @@
 
 ## 1. Introduction
 
-This handbook provides a comprehensive technical overview of the Agentcis CRM platform. It is intended for engineers onboarding to the platform and covers system architecture, infrastructure, URL routing, request flow, multi-tenancy, logging, health monitoring, and asynchronous processing. All descriptions reflect staging configurations on AWS. — based on staging configurations.
+This doc provides a comprehensive technical overview of the Agentcis CRM platform. It is intended for engineers onboarding to the platform and covers system architecture, infrastructure, URL routing, request flow, multi-tenancy, logging, health monitoring, and asynchronous processing.
 
 ---
 
@@ -79,16 +79,17 @@ Traffic routing sequence:
 
 Subdomain resolution is managed via Cloudflare using a wildcard DNS record. CNAME records point to the AWS Application Load Balancer (ALB).
 
-graph TD
-    A[User Browser] --> B[tenant.agentcis.com]
-    B --> C[Cloudflare DNS<br/>CNAME -> ALB DNS]
-    C --> D[ALB Listeners<br/>HTTP/HTTPS -> Rules & Priority -> Target Groups]
-    D --> E[EC2 Instances<br/>Frontend + Backend]
-    E --> F[(Optional) Microservice calls<br/>-> K8s Pods]
-
-    style A fill:#f9f9f9,stroke:#333
-    style D fill:#e1f5fe,stroke:#01579b
-    style E fill:#fff3e0,stroke:#e65100
+User Browser
+     |
+tenant.agentcis.com
+     |
+Cloudflare DNS (CNAME → ALB DNS)
+     |
+ALB Listeners (HTTP/HTTPS) → Rules & Priority → Target Groups
+     |
+EC2 Instances (Frontend + Backend)
+     |
+(Optional) Microservice calls → K8s Pods
 
 ---
 
