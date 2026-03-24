@@ -80,16 +80,21 @@ Traffic routing sequence:
 Subdomain resolution is managed via Cloudflare using a wildcard DNS record. CNAME records point to the AWS Application Load Balancer (ALB).
 
 User Browser
-     |
+      │
+      ▼
 tenant.agentcis.com
-     |
-Cloudflare DNS (CNAME → ALB DNS)
-     |
-ALB Listeners (HTTP/HTTPS) → Rules & Priority → Target Groups
-     |
+      │
+      ▼
+Cloudflare DNS (CNAME ➔ ALB DNS)
+      │
+      ▼
+ALB Listeners (HTTP/HTTPS) ➔ Rules & Priority ➔ Target Groups
+      │
+      ▼
 EC2 Instances (Frontend + Backend)
-     |
-(Optional) Microservice calls → K8s Pods
+      │
+      ▼
+(Optional) Microservice calls ➔ K8s Pods
 
 ---
 
