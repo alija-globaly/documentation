@@ -79,17 +79,16 @@ Traffic routing sequence:
 
 Subdomain resolution is managed via Cloudflare using a wildcard DNS record. CNAME records point to the AWS Application Load Balancer (ALB).
 
-User Browser
-      ↓
-tenant.agentcis.com
-      ↓
-Cloudflare DNS (CNAME → ALB DNS)
-      ↓
-ALB Listeners (HTTP/HTTPS) → Rules & Priority → Target Groups
-      ↓
-EC2 Instances (Frontend + Backend)
-      ↓
-Microservice calls → K8s Pods
+graph TD
+    A[User Browser] --> B[tenant.agentcis.com]
+    B --> C[Cloudflare DNS<br/>CNAME -> ALB DNS]
+    C --> D[ALB Listeners<br/>HTTP/HTTPS -> Rules & Priority -> Target Groups]
+    D --> E[EC2 Instances<br/>Frontend + Backend]
+    E --> F[(Optional) Microservice calls<br/>-> K8s Pods]
+
+    style A fill:#f9f9f9,stroke:#333
+    style D fill:#e1f5fe,stroke:#01579b
+    style E fill:#fff3e0,stroke:#e65100
 
 ---
 
@@ -180,3 +179,38 @@ Log Fields: date, time, tenant, message
 
 Log verbosity is configured per route. High-traffic or low-risk routes use lower priorities to reduce noise; critical paths are set to P1.
 
+| Level | Name | Trigger Conditions | Action Required |
+| --- | --- | --- | --- |
+| P1 | Critical / Error | System failures, unhandled exceptions, data integrity errors. | Immediate investigation required. |
+| P2 | Warning | Slow queries, retries, non-fatal errors, degraded performance. | Monitor; investigate if sustained. |
+| P3 | Info / Debug | Standard operational events, request traces, routine actions. | No action. Used for audit trails. |
+
+
+
+
+---
+
+## 7. Health Monitoring
+Agentcis implements two health check endpoints at both the pod (microservice) and application (backend) level. These endpoints are used by AWS ALB and Kubernetes liveness/readiness probes to ensure that only healthy instances receive traffic.
+
+
+Log Fields: date, time, tenant, message
+
+### 7.1 Health Check Endpoints
+
+| Endpoint | Method | Purpose | Frequency / Polling | Logging |
+| --- | --- | --- | --- | --- |
+| /health | GET | Basic liveness check. Confirms pod or instance is up. | Every 30 s | Suppressed. No log entries generated. |
+| /health/detailed | GET | Full diagnostic — validates all sub-components. | Once at startup | Logged once at startup. Not polled continuously. |
+
+
+
+## 8. Asynchronous Processing — LavinMQ
+LavinMQ: Asynchronous message broker
+Keeps APIs responsive even under high load.
+
+Purpose: Handle background tasks without blocking API responses
+Usage:
+- Backend publishes events/tasks to queues.
+- Consumer service picks up and processes them asynchronously.
+- Common tasks: sending emails, bulk data import/export, report generation.
