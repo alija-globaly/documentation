@@ -22,9 +22,9 @@ Agentcis is a multi-tenant SaaS CRM designed for agencies to manage clients, lea
 
 ### 2.1. Core Stack:
 
-- Backend: PHP 8, Laravel Framework
-- Frontend: Vue.js 2.x (Webpack / Laravel Mix)
-- Microservices: Node + gRPC (bulk import, onboarding, campaign modules)
+- Backend: PHP / Laravel
+- Frontend: Vue.js + Webpack / Laravel Mix
+- Microservices: Node + gRPC
 - Database: MySQL (1 master, multiple tenant databases)
 - Web Server: Nginx + PHP-FPM
 - Cache / Queue: DragonFly (cache), LavinMQ (message broker)
@@ -35,7 +35,7 @@ Agentcis is a multi-tenant SaaS CRM designed for agencies to manage clients, lea
 Agentcis uses a hybrid architecture:
 
 Modular Monolith: Core Laravel application
-Dedicated Microservices: Node.js services for high-load modules
+Dedicated Microservices: Node.js + gRPC services for high-load modules (bulk import, onboarding, campaigns).
 Multi-Tenant: Tenant isolation is maintained at the database and routing layer
 
 ---
@@ -128,7 +128,7 @@ Microservice calls → K8s Pods
 | **4** | **Cache Lookup**<br>Backend queries DragonFly; cache hit → response returned. |
 | **5** | **Database Query**<br>Cache miss → query MySQL (writes → Master, reads → Replica). |
 | **6** | **Async Offload**<br>Long-running tasks (emails, imports, reports) are published as messages to LavinMQ queues. |
-| **6** | **Consumer Processing**<br>Worker processes consume queued jobs asynchronously. |
+| **7** | **Consumer Processing**<br>Worker processes consume queued jobs asynchronously. |
 
 
 ### 5.3 Database Configuration
