@@ -79,8 +79,7 @@ Traffic routing sequence:
 
 Subdomain resolution is managed via Cloudflare using a wildcard DNS record. CNAME records point to the AWS Application Load Balancer (ALB).
 
-
-
+<div style="border: 1px solid #ccc; padding: 15px; background-color: #f9f9f9;">
 > User Browser <br>
 > &nbsp;&nbsp;&nbsp;&nbsp;      │
    
@@ -96,7 +95,8 @@ Subdomain resolution is managed via Cloudflare using a wildcard DNS record. CNAM
 > EC2 Instances (Frontend + Backend) <br>
 > &nbsp;&nbsp;&nbsp;&nbsp;      │
       
-> Microservice calls ➔ K8s Pods
+> Microservice calls ➔ K8s Pods</div>
+
 
 ---
 
