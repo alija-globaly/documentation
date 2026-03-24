@@ -15,7 +15,7 @@ Agentcis is a multi-tenant CRM designed for agencies managing clients, leads, co
 ### 2.1. Core Stack:
 
 - PHP (Laravel Framework)
-- Frontend powered by Vue.js 2.x, bundled with Webpack/Laravel Mix
+- Frontend powered by Vue.js, bundled with Webpack/Laravel Mix
 - Microservices (Node.js + gRPC) 
 - MySQL (one master and multiple tenant databases)
 - Nginx + PHP-FPM
@@ -79,22 +79,22 @@ Traffic routing sequence:
 
 Subdomain resolution is managed via Cloudflare using a wildcard DNS record. CNAME records point to the AWS Application Load Balancer (ALB).
 
-User Browser
+User Browser <br>
       │
       ▼
-tenant.agentcis.com
+tenant.agentcis.com <br>
       │
       ▼
-Cloudflare DNS (CNAME ➔ ALB DNS)
+Cloudflare DNS (CNAME ➔ ALB DNS) <br>
       │
       ▼
-ALB Listeners (HTTP/HTTPS) ➔ Rules & Priority ➔ Target Groups
+ALB Listeners (HTTP/HTTPS) ➔ Rules & Priority ➔ Target Groups <br>
       │
       ▼
-EC2 Instances (Frontend + Backend)
+EC2 Instances (Frontend + Backend) <br>
       │
       ▼
-(Optional) Microservice calls ➔ K8s Pods
+Microservice calls ➔ K8s Pods
 
 ---
 
@@ -150,14 +150,15 @@ DragonFly: Redis-compatible in-memory cache.
 Stores frequently accessed data (tenant configs, session data).
 Backend integrated; frontend does not access cache directly.
 
+
 ---
 
 ## 6. Logging Structure
 Agentcis uses structured JSON logging to provide consistent, machine-parseable log output across all services. Logs are correlated by tenant and timestamp to support efficient debugging and observability.
 
+`Log Fields:` date, time, tenant, message
 
 
-Log Fields: date, time, tenant, message
 
 ### 6.1 Standard Log Schema
 
@@ -200,8 +201,6 @@ Log verbosity is configured per route. High-traffic or low-risk routes use lower
 Agentcis implements two health check endpoints at both the pod (microservice) and application (backend) level. These endpoints are used by AWS ALB and Kubernetes liveness/readiness probes to ensure that only healthy instances receive traffic.
 
 
-Log Fields: date, time, tenant, message
-
 ### 7.1 Health Check Endpoints
 
 | Endpoint | Method | Purpose | Frequency / Polling | Logging |
@@ -212,11 +211,11 @@ Log Fields: date, time, tenant, message
 
 
 ## 8. Asynchronous Processing — LavinMQ
-LavinMQ: Asynchronous message broker
+`LavinMQ:` Asynchronous message broker
 Keeps APIs responsive even under high load.
 
-Purpose: Handle background tasks without blocking API responses
-Usage:
+`Purpose:` Handle background tasks without blocking API responses
+`Usage:`
 - Backend publishes events/tasks to queues.
 - Consumer service picks up and processes them asynchronously.
 - Common tasks: sending emails, bulk data import/export, report generation.
