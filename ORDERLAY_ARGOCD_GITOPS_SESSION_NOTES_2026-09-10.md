@@ -766,4 +766,46 @@ Deliberately scoped to **staging only, infra layer only** — no app-workload Ap
 
 ---
 
+### 11.12 Follow-up: "do we even need the repo secret, since we apply the root file directly?" — resolved with live proof
+
+A objection came up after §11.9–§11.10 were written: *"we did not push `staging-root.yml` via Ansible — we applied it directly on the server ourselves, the same way agentcis does it, so maybe we don't need the `gitops-orderlay-deployments` repo secret at all."*
+
+**Correction to §5 above, first**: on agentcis, `staging-root.yml` (the second-tier root — `010-stage-pre-setup-010` / `111-stage-application-111`, pointing at the *app-workload* repo) is confirmed to have been applied **by hand, via SSH + `kubectl apply -f`**, sitting in `~/bootstrap/staging-root.yml` on the master — not through the Ansible `2.0-super-root-setup.yml` task documented in §5. That task, as traced in §5, applies a *different* file (`super-root.yml`, the top-tier root pointing at the shared `argocd-gitops` *addons* repo). Both are real, both exist, but they're not the same file and not applied the same way. Worth remembering there are two independent root layers here, not one.
+
+That correction, however, turned out to be irrelevant to the actual question — which is a distinction worth stating plainly since it's easy to conflate:
+
+- **Applying the root `Application` object** (`kubectl apply -f staging-root.yml`, whether done by Ansible or by hand) is a one-time write straight to the Kubernetes API. It creates a CR in etcd. Kubernetes validates it only against the `Application` CRD's schema — it never checks whether `repoURL` is reachable or whether any credential exists. **This step never needs a repo secret, by construction, regardless of how it's applied.**
+- **What happens immediately after** is a different, ongoing process: `argocd-application-controller` reads the new object's `sources:` and asks `argocd-repo-server` to clone/fetch that repo, continuously, forever (well, every reconcile cycle) — to discover the child manifests it's supposed to create. *This* is the step that needs a matching `Secret` labeled `argocd.argoproj.io/secret-type: repository`, and it happens whether the parent object was applied by Ansible, by hand, or by a puppy stepping on the keyboard.
+
+So "we applied it directly, not via Ansible" was true, but doesn't bear on whether a repo secret is needed — that was never a function of *who* ran the `kubectl apply`, only of what's written inside the file.
+
+**Settled with live evidence, in three steps, all run against agentcis's real staging master:**
+
+1. `kubectl get application -n argocd | grep -i agentcisapp` showed real app-workload Applications (`agentcisapp-parent-api`, `agentcisapp-webhook-api`, `agentcisapp-registration-api`, etc.) as `Synced`/`Healthy` — these live at `apps/staging/application/services/*.yml` inside `gitops-agentcisapp-deployments.git`, so their existing/healthy state alone proves `argocd-repo-server` is successfully, continuously authenticating to that repo.
+2. `kubectl get application 010-stage-pre-setup-010 -n argocd -o jsonpath='{.status.conditions}'` returned **completely empty**. An empty `.status.conditions` means ArgoCD has never recorded a reconcile/comparison error on this Application — i.e., the repo fetch has succeeded on every cycle since it was created. If the secret were missing or wrong, this field would show a `ComparisonError` condition (authentication failure / repository not found), not silence.
+3. Decoded the actual secret and confirmed it matches exactly what `010-stage-pre-setup-010`'s `sources:` expects:
+   ```bash
+   kubectl get secrets -n argocd -l argocd.argoproj.io/secret-type=repository
+   # argocd-ansible-github-secret   (single-suffixed — correctly named, unlike orderlay's)
+   # gitops-ansible-github-secret
+
+   kubectl get secret gitops-ansible-github-secret -n argocd -o jsonpath='{.data.url}' | base64 -d
+   # https://github.com/GlobalyHub/gitops-agentcisapp-deployments.git   ← exact match
+   ```
+
+**Conclusion**: the repo secret is required, and on agentcis it's working — silently, invisibly, which is exactly why applying `staging-root.yml` there "just worked" with no extra steps taken at apply-time. The credential had already been set up correctly beforehand (at some point via the Ansible `1.2-repo-secret-setup.yml` task, per §11.9); nobody had to think about it again after that. That invisibility was mistaken for "not needed."
+
+Side-by-side, so the contrast is explicit:
+
+| | agentcis (working) | orderlay (broken, §11.9) |
+|---|---|---|
+| Secret name | `gitops-ansible-github-secret` | `gitops-ansible-github-secret-github-secret` (double-suffixed — cosmetic only, not the actual bug) |
+| `.data.url` | `gitops-agentcisapp-deployments.git` ✅ matches its root Application's `sources:` | `GH-infra-and-k8s-charts-central.git` ❌ — wrong repo entirely |
+| `.data.username` | (agentcis's own dedicated token identity) | `agentcisapp-argocd-token` ❌ — agentcis's identity, not orderlay's |
+| Root Application's `.status.conditions` | empty — never had a reconcile error | not yet applied; would be expected to show a `ComparisonError`/auth-failure condition given the current secret state |
+
+**Practical takeaway for orderlay**: `kubectl apply -f staging-root.yml` will succeed on orderlay's cluster today regardless of the secret's state — that part was never in doubt. But nothing downstream of that apply will progress — no `pre-apps` children, no CRDs, nothing — until `gitops-ansible-github-secret-github-secret` is fixed to point at `gitops-orderlay-deployments.git` with a valid token (§11.10). The failure mode isn't a rejected `apply` command, it's a silent, indefinite retry loop (this file's `syncPolicy.retry.limit: -1`) — checkable via the same `.status.conditions` field used above, which is expected to show a real error the moment it's checked on orderlay's version of this Application post-apply.
+
+---
+
 *Companion reading (updated): `note/ORDERLAY_TERRAFORM_BOOTSTRAP_IAM_AND_ASG_LIFECYCLE_NOTES.md` (server/IAM side — §11.5 of this addendum directly corrects an over-cautious reading of that note's `oidc_create` discussion), `note/ORDERLAY_ARGOCD_INSTALL_AND_APP_OF_APPS_NOTES.md` (the original ArgoCD-install run), `note/ORDERLAY_ARGOCD_APP_OF_APPS_CASCADE_DIAGRAM.html` (visual version of §4).*
