@@ -459,11 +459,12 @@ flowchart LR
 
 ## 9. Open / unclear items
 
-- **Pilot service not yet decided.** `backend_v2` was proposed (core API, proves the pattern where it matters most) vs. `web-v2` (simpler runtime, lower blast radius) vs. `notification-service` (smallest, safest to break). Not yet chosen.
-- **Repo-creation approach not yet decided** — whether to create the empty `gitops-orderlay-deployments` repo on GitHub first (so file drafts reference the real URL) or draft locally against a placeholder and push later.
-- **Whether the generic `backend` chart truly fits every orderlay service as-is**, or whether services with different runtime needs (e.g. `order-service`'s gRPC port 8089, `web-v2`'s Next.js build) will need chart tweaks — not yet verified against each service individually, only spot-checked for `backend_v2`-shaped Node services.
-- **How ArgoCD gets credentials for the new `gitops-orderlay-deployments` repo** — extend the existing `1.2-repo-secret-setup.yml` ansible task to register a second repo, or add it via `argocd repo add` directly — not yet decided.
+- **Pilot service not yet decided.** `backend_v2` was proposed (core API, proves the pattern where it matters most) vs. `web-v2` (simpler runtime, lower blast radius) vs. `notification-service` (smallest, safest to break). Not yet chosen. As of the 2026-09-11 addendum (§11), this is now deliberately deferred until the infra layer (§11) is proven — see §11.1.
+- **Repo-creation approach** — resolved: `gitops-orderlay-deployments` was created on GitHub on 2026-09-11 and is being built out directly (branch `alija-init-gitops-structure`), no placeholder-URL drafting phase was needed.
+- **Whether the generic `backend` chart truly fits every orderlay service as-is**, or whether services with different runtime needs (e.g. `order-service`'s gRPC port 8089, `web-v2`'s Next.js build) will need chart tweaks — still not verified; unchanged, still pending until pilot service work starts.
+- **How ArgoCD gets credentials for the new `gitops-orderlay-deployments` repo** — mechanism identified (§11.9): the existing `1.2-repo-secret-setup.yml` ansible task, not a new `argocd repo add`. **As of 2026-09-11 this is a live, unresolved blocker** — see §11.9–§11.10 for the exact bug found and the fix path.
 - Everything in this note covers **staging only**; production for orderlay is a later, separate phase once staging is proven, same as agentcis-app's own history.
+- **New, from the addendum**: the ingress mechanism itself changed from the plan in §2/§6/§7 above — see §11.2. Those sections are kept as-written for historical accuracy (they reflect the reasoning at the time), but their conclusion ("orderlay doesn't need agentcis's ALB/Gateway API machinery") is superseded.
 
 ---
 
@@ -482,6 +483,287 @@ flowchart LR
 | orderlay's current (non-GitOps) CI/CD | `orderlay/.github/workflows/k8s-*.yml` |
 | Visual diagram of §4's cascade | `note/ORDERLAY_ARGOCD_APP_OF_APPS_CASCADE_DIAGRAM.html` |
 
+See §11.11 for the full file-by-file table of `gitops-orderlay-deployments` as it stood at the end of the 2026-09-11 session.
+
 ---
 
-*Companion reading: `note/ORDERLAY_TERRAFORM_BOOTSTRAP_IAM_AND_ASG_LIFECYCLE_NOTES.md` (server/IAM side), `note/ORDERLAY_ARGOCD_INSTALL_AND_APP_OF_APPS_NOTES.md` (the original ArgoCD-install run this session's §4–§5 dig much deeper into), `note/ORDERLAY_ARGOCD_APP_OF_APPS_CASCADE_DIAGRAM.html` (visual version of §4).*
+## 11. Session Addendum (2026-09-11): Building the AWS Gateway API Skeleton — a Reversed Decision, an IAM Mystery Solved, and a Live Credential Bug
+
+> **Context:** this picks up the very next day. `gitops-orderlay-deployments` (proposed but not yet created as of §8 above) now exists on GitHub, scaffolded on branch `alija-init-gitops-structure`. This section is a detailed, chronological log of everything worked through in that follow-up session — including one outright reversal of §6/§7's conclusion above, a piece of IAM archaeology that changed the risk picture for the better, and a real misconfiguration found live on orderlay's cluster that's still unresolved as this addendum was written.
+
+### 11.1 TL;DR of this addendum
+
+1. **Reversed decision**: orderlay will mirror agentcis's **AWS Gateway API / ALB** pattern in full, not plain `ingress-nginx` as §6/§7 concluded — deliberate call, because upstream `kubernetes/ingress-nginx` has reached end-of-life. See §11.2.
+2. **Confirmed live** (not just from files) that agentcis runs its *entire* ArgoCD setup — both staging and production — on the single built-in `project: default` AppProject; the `orderlay`-specific `AppProject` that had been scaffolded was deleted for parity. See §11.3.
+3. **A resource named "IRSA role" turned out not to be IRSA at all.** It's a plain EC2 instance-profile role (trust policy is `ec2.amazonaws.com`, not an OIDC provider), already created and attached to *every* orderlay node — master, workers, and ASG launch templates — automatically by the same shared Terraform template agentcis uses. No new AWS/IAM provisioning was needed, reversing an earlier (wrong) assessment that this was a hard blocker. Confirmed live via the AWS EC2 console. See §11.5.
+4. **A `nodeAffinity` block in agentcis's own reference file turned out to be dead code** — verified live on agentcis-staging that no node carries the label it looks for. Dropped entirely from orderlay's version rather than copied forward. See §11.6.
+5. **Found a real, live misconfiguration**: the ArgoCD repo-credential Secret meant for `gitops-orderlay-deployments` was actually created pointing at `GH-infra-and-k8s-charts-central.git` (the *infra* repo, not even agentcis's app repo) — because the shared `.env` file used to provision it had `GITOPS_REPO_URL` mistakenly set equal to `ARGO_REPO_URL`. **As of this writing, orderlay's ArgoCD has no working credential for its own app-workload repo.** Fix identified but not yet applied — see §11.9–§11.10.
+
+---
+
+### 11.2 Decision reversal: AWS Gateway API instead of ingress-nginx, and why
+
+§6/§7 above concluded orderlay didn't need agentcis's ALB/Gateway API machinery (`pre-apps/aws-crd-and-controller.yml`, `public-traffic/`, `GatewayClass`) because orderlay already runs plain `ingress-nginx`. When `gitops-orderlay-deployments` was actually scaffolded, it was built as a structural mirror of `gitops-agentcisapp-deployments` *including* that ALB/Gateway API layer — at first glance this looked like scaffolding drift (copied structure not yet pruned to match the ingress-nginx conclusion).
+
+It wasn't drift — it was a deliberate, informed reversal: **the upstream `kubernetes/ingress-nginx` project has reached end-of-life**, so building orderlay's public-traffic layer on it now would mean inheriting a dead dependency from day one. The decision is to fully mirror agentcis's proven AWS Load Balancer Controller + Gateway API pattern instead, not a partial adoption. This makes §6's conclusion ("orderlay doesn't need this") obsolete, though §6 is left as-written above since it accurately reflects the reasoning *at the time* — orderlay's cluster still has `ingress-nginx` running too (via the shared `argocd-gitops` repo, §2 above), it's just not going to be the mechanism for the app-workload public traffic layer.
+
+---
+
+### 11.3 AppProject: confirmed agentcis runs entirely on `project: default`
+
+The scaffolded `gitops-orderlay-deployments/projects/orderlay.yml` was a dedicated `AppProject` — scoped `sourceRepos` (just the one repo), scoped `destinations` (only `orderlay-{development,staging,production}` + `argocd` namespaces), and an explicit `clusterResourceWhitelist` (only `Namespace`, CRDs, `ClusterRole`, `ClusterRoleBinding`, `GatewayClass`). This diverged from what a grep of every `Application` file in `gitops-agentcisapp-deployments` and `argocd-gitops` showed: **every single Application in both repos, on every branch checked (including `live-values`, the branch ArgoCD actually watches), uses `project: default`** — the wide-open, built-in AppProject every ArgoCD install ships with. The one exception, `project: infra` in a `.disable`d file, references an AppProject that doesn't exist anywhere in the repo. A `projects/production.yml` file exists in `gitops-agentcisapp-deployments` but nothing actually references `project: production` — it's dead weight.
+
+This was then verified **live**, not just from Git, by running on both real agentcis clusters:
+```bash
+kubectl get appprojects -n argocd
+```
+Both agentcis production and agentcis staging returned only:
+```
+NAME      AGE
+default   168d   # production
+default   83d    # staging
+```
+Confirming `production` and `infra` were never actually created as live objects in either cluster — the whole agentcis setup, in both environments, runs on `default` with zero AppProject-level scoping.
+
+**Decision**: orderlay matches this for parity. `projects/orderlay.yml` was deleted, and both root Applications in `bootstrap/staging-root.yml` were changed from `project: orderlay` to `project: default`.
+
+---
+
+### 11.4 Branch convention: switched to `live-values`
+
+agentcis's root Applications all use `targetRevision: "live-values"` — a dedicated deploy branch, separate from `main`, that CI pushes `sed`-bumped image tags to (keeping automated commits out of PR/dev history). Orderlay's scaffold originally used `targetRevision: "main"`. Changed to `"live-values"` in `bootstrap/staging-root.yml` for consistency and because that's the branch CI will need once the pipeline-rewiring phase (§8's roadmap) happens — no reason to defer this rename to later. **The `live-values` branch does not exist yet** in `gitops-orderlay-deployments` (only `main` and the local working branch `alija-init-gitops-structure` exist) — this is a known, accepted forward-reference; the plan (stated directly by the person doing this work) is to finish building out the file structure first, then create and push `live-values`, then do the actual ArgoCD-side registration/apply against that branch.
+
+---
+
+### 11.5 The "IRSA role" is actually a plain EC2 instance-profile role — no new AWS provisioning needed
+
+agentcis's real `pre-apps/aws-crd-and-controller.yml` installs, in order (`sync-wave: -100` on both): the Gateway API CRDs (`kubernetes-sigs/gateway-api` v1.4.1) and the AWS Load Balancer Controller Helm chart (`aws.github.io/eks-charts`, `aws-load-balancer-controller` v3.0.0). The controller's Helm values reference a `serviceAccount.annotations["eks.amazonaws.com/role-arn"]` pointing at `arn:aws:iam::834033184010:role/Agentcis-staging-K8s-EC2-IRSA-role`.
+
+The `eks.amazonaws.com/role-arn` annotation and the `-IRSA-role` name both strongly imply IRSA (IAM Roles for Service Accounts) — an OIDC/web-identity-token mechanism that requires a registered IAM OIDC identity provider. Orderlay's own Terraform bootstrap note (`ORDERLAY_TERRAFORM_BOOTSTRAP_IAM_AND_ASG_LIFECYCLE_NOTES.md`) records `oidc_create = false` for orderlay's staging/development environments — which, taken at face value, looked like a hard blocker: no OIDC provider, so no working IRSA role, so the AWS Load Balancer Controller would have no AWS credentials.
+
+**This turned out to be a wrong inference.** Reading the actual Terraform module (`infrastructure/modules/create-services/aws-permissions/k8s-policy-and-roles/k8s-irsa-roles.tf`) shows the role's real trust policy:
+```hcl
+assume_role_policy = jsonencode({
+  Statement = [{
+    Effect    = "Allow"
+    Principal = { Service = "ec2.amazonaws.com" }
+    Action    = "sts:AssumeRole"
+  }]
+})
+```
+That's an **EC2 instance-profile trust policy**, not an OIDC trust policy — there is no IAM OIDC provider involved anywhere in this mechanism. `oidc_create` is unrelated; it only gates a *separate* resource (`iam-github-action-irsa-role.tf`) used for GitHub Actions' own OIDC federation into AWS, a completely different concern.
+
+Better still: this role's instance profile (`aws_iam_instance_profile.main_aws_load_balancer_controller_profile`) is **already wired onto every node** — master, standalone EC2s, and every ASG launch template — in `infrastructure/templates-agentcis/main-template.tf` (the shared template both agentcis's and orderlay's `project/*/main.tf` call), at multiple points (lines ~113–115, ~224–229, ~384–385). It's also already attached to the full, real upstream AWS Load Balancer Controller IAM policy (`aws-elb-policy-file.json`, sourced directly from the `kubernetes-sigs/aws-load-balancer-controller` repo's official install policy) via `attach-policy-with-role.tf`.
+
+**Net effect: this was created and attached automatically the moment `terraform apply` ran for orderlay-staging.** No new IAM/OIDC provisioning was needed at all — every pod on every orderlay node already inherits these AWS permissions via the node's EC2 instance metadata (IMDS), regardless of which Kubernetes ServiceAccount it runs as. The `eks.amazonaws.com/role-arn` annotation is inert in this setup (there's no pod-identity-webhook on a self-managed cluster to interpret it) — harmless to keep for parity with agentcis's file, but not what's actually granting access.
+
+**Confirmed live** via the AWS EC2 console: instance `i-0a3f76c7e1745525d` (`[orderlay-staging]-k8s-root-master-nginx`, account `381491939487`, `ap-south-1`) shows `IAM role: orderlay-staging-K8s-EC2-IRSA-role` already attached, VPC `vpc-0956141e90f4f7a4e (orderlay-staging-vpc)`. Naming convention confirmed as `${project_name}-${environment}-K8s-EC2-IRSA-role`.
+
+---
+
+### 11.6 The `nodeAffinity` block in agentcis's reference file is dead code
+
+agentcis's `gateway-api-aws.yml` Helm values (for the AWS Load Balancer Controller chart) include:
+```yaml
+affinity:
+  nodeAffinity:
+    preferredDuringSchedulingIgnoredDuringExecution:
+      - weight: 100
+        preference:
+          matchExpressions:
+            - key: role
+              operator: In
+              values:
+                - aws-elb-master
+```
+with an adjacent comment showing the manual command needed to make it do anything: `kubectl label node aws-elb--master-172-34-17-55 role=aws-elb-master`.
+
+Mechanically, `preferredDuringSchedulingIgnoredDuringExecution` is a **soft** preference — if no node carries the matching label, it silently has zero effect and the pod schedules normally via the default scheduler; there's no error either way. Since §11.5 already established that *every* orderlay node carries the IAM instance profile (not just one specially-labeled node), there was no IAM-based reason to expect this pinning was actually required.
+
+**Verified empirically, live, on agentcis's own staging cluster:**
+```bash
+kubectl get nodes -L role
+# NAME                                    ...  ROLE
+# default-server-worker-172-34-13-92      ...  (blank)
+# default-server-worker-172-34-16-76      ...  (blank)
+# root-master-nginx-ingress-172-34-6-25   ...  (blank)
+
+kubectl get nodes -l role=aws-elb-master
+# No resources found
+```
+No node in agentcis's real, running staging cluster carries this label. The block has been sitting in agentcis's file doing nothing — the controller pod has simply been scheduled wherever the default scheduler put it. **Decision: dropped this block entirely from orderlay's `gateway-api-aws.yml`** rather than copying forward dead configuration. If node-pinning is ever needed for an unrelated reason later (e.g. wanting a stable host for the controller's `hostNetwork: true` webhook port), it should be added back deliberately *and* the matching `kubectl label` step actually performed — otherwise it repeats the exact same no-op agentcis has carried for months.
+
+---
+
+### 11.7 `gitops-values/staging/others/gateway-api-aws.yml` — built with orderlay's real values
+
+Using the findings above, the values file was populated with orderlay's actual `vpcId` and role ARN (both confirmed live, §11.5), `region: ap-south-1`, and the `nodeAffinity` block omitted (§11.6):
+
+```yaml
+#### reference : https://github.com/kubernetes-sigs/aws-load-balancer-controller/blob/main/helm/aws-load-balancer-controller/values.yaml
+clusterName: orderlay-staging
+region: ap-south-1
+
+vpcId: vpc-0956141e90f4f7a4e
+serviceAccount:
+  create: true
+  name: aws-load-balancer-controller
+  annotations:
+    eks.amazonaws.com/role-arn: "arn:aws:iam::381491939487:role/orderlay-staging-K8s-EC2-IRSA-role"
+
+hostNetwork: true
+replicaCount: 1
+
+enableServiceMutatorWebhook: false
+webhookConfig:
+  webhookBindPort: 9443
+  disableIngressValidation: true
+
+controllerConfig:
+  featureGates:
+    ALBGatewayAPI: true
+    NLBGatewayAPI: true
+
+enableShield: false
+enableWaf: false
+enableWafv2: false
+
+logLevel: info
+```
+
+**As actually committed to the repo as of this addendum, three things from this recommendation were not yet applied**, worth fixing on the next pass:
+- `clusterName` is still literally `default-cluster` (copied verbatim from agentcis, never updated to `orderlay-staging`). Low severity — this is just a tracking tag AWS puts on ALB/target-group resources, and since orderlay is a separate AWS account it wouldn't collide with anything — but it's sloppy and worth fixing for clarity.
+- The `nodeAffinity` block discussed in §11.6 is **still present** in the file as committed — the decision to drop it was made and agreed, but the edit hadn't landed as of the last file check this session.
+- agentcis's own troubleshooting-history comments (informal notes in Nepali/English about a service-creation issue they'd hit) are still present verbatim. Cosmetic only, but confusing noise in a fresh orderlay file.
+
+`enableServiceMutatorWebhook: false` was deliberately kept as-is (not re-enabled) since the reason agentcis disabled it isn't known — safer to inherit than guess, revisit only if `TargetGroupBinding` issues show up later.
+
+---
+
+### 11.8 `manifest/` layer: one real bug fixed, one open risk still unresolved
+
+**`gw-class.yml`** — the file as originally drafted had a placeholder/guessed `controllerName: gateway.k8s.aws/gateway-controller` with a TODO to verify against agentcis. Checked agentcis's real file and found the guess was wrong. Corrected to match agentcis exactly (this string is fixed by the AWS Load Balancer Controller product itself, not something to invent):
+```yaml
+apiVersion: gateway.networking.k8s.io/v1beta1
+kind: GatewayClass
+metadata:
+  name: aws-alb-gateway-class
+  annotations:
+    argocd.argoproj.io/sync-wave: "-40"
+spec:
+  controllerName: gateway.k8s.aws/alb
+```
+This fix has been applied and confirmed in the repo.
+
+**`certificate-issuer.yml`** — now byte-identical to agentcis's real file, including the **production** Let's Encrypt ACME endpoint (`acme-v02.api.letsencrypt.org`) and agentcis's real email. Flagged risk, **still unresolved as of this addendum**: Let's Encrypt's production endpoint rate-limits to 5 certificates per exact domain per week. Since this `ClusterIssuer` is likely to be deleted/reapplied repeatedly while testing ArgoCD sync behavior (matching the explicit "we are in test phase, finalizers left commented so it's easy to delete" stance taken this session, §11.9 note below), hitting that limit is a real risk that would then block real cert issuance later. Recommended (not yet applied): switch to `acme-staging-v02.api.letsencrypt.org` until the plumbing is proven, then switch to production for real TLS.
+
+**On `finalizers`**: both `Application` objects in `pre-apps/aws-crd-and-controller.yml` have `finalizers: [resources-finalizer.argocd.argoproj.io/background]` commented out, same as originally scaffolded. This was raised as a possible parity gap with agentcis (whose real file has them active) but **deliberately left commented, by direct decision**: the project is in an active test phase where these Applications may need to be deleted and recreated, and the finalizer would force a cascading delete of everything the Application created (CRDs, the controller deployment) on every such delete — undesirable friction while iterating. Revisit once past the test phase.
+
+**Still outstanding, unfixed as of this addendum**: `pre-apps/aws-crd-and-controller.yml`'s `aws-load-balancer-controller` Application still has a copy-paste bug in its second `sources` entry — `repoURL: https://github.com/GlobalyHub/gitops-agentcisapp-deployments.git`, which should read `gitops-orderlay-deployments.git`. This is the `ref: values` source that the `$values/gitops-values/staging/others/gateway-api-aws.yml` reference resolves against — until fixed, that lookup would resolve against the *agentcis* repo, not orderlay's own (freshly created, §11.7) values file.
+
+---
+
+### 11.9 ArgoCD repo-credentials: how the mechanism actually works, and a live misconfiguration found
+
+Traced the full mechanism, since "how does ArgoCD get credentials for a new repo" was an open item from §9 above:
+
+1. `main/argocd-setup.yml` (an Ansible playbook, run via `make <project>-<env>-setup-argocd` from `GH-infra-and-k8s-charts-central/ansible-config-mgmt/`) runs a chain of tasks against the K8s master over SSH, including `tasks/argo-cd-helm/1.2-repo-secret-setup.yml`.
+2. That task copies a Secret template (`remote-server-files/k8s/secrets/repo-secrets.yml`, with `%placeholder%` tokens) onto the master's disk **twice**, `sed`-substitutes real values into each copy, and `kubectl apply`s both:
+   - One populated from `ARGO_SECRET_NAME` / `ARGO_REPO_URL` (for the shared `argocd-gitops` addons repo)
+   - One populated from `GITOPS_SECRET_NAME` / `GITOPS_REPO_URL` (for the app-workload repo — this is the one that matters for `gitops-orderlay-deployments`)
+   - Both also read `REPO_USERNAME` / `REPO_TOKEN`
+   - The resulting Kubernetes `Secret` objects, in the `argocd` namespace, are labeled `argocd.argoproj.io/secret-type: repository` — the specific label ArgoCD watches to recognize "here's a Git credential."
+3. **Critically, none of these env vars are set per-project/per-environment.** They come from `ansible-config-mgmt/.env` (git-ignored; only `.env.sample` is tracked), loaded via `docker-compose.yml`'s `env_file: .env` for the whole `ansible` container — the *same* file regardless of which `project=`/`env=` you pass to the Makefile. This is a real structural gotcha: nothing stops you from running this against a different project's inventory while `.env` still holds the previous project's repo/token.
+
+Checked the actual live `.env` on this machine: it currently holds agentcis's values (`GITOPS_REPO_URL=.../gitops-agentcisapp-deployments.git`, `REPO_USERNAME=agentcisapp-argocd-token`, `AWS_DEFAULT_REGION=ap-southeast-2` — agentcis's region, not orderlay's `ap-south-1`). Running the Makefile target against orderlay's inventory with this `.env` unchanged would misconfigure orderlay's cluster — which is exactly what turned out to have already happened, from a **different laptop**, the day before this addendum:
+
+**Verified live on the orderlay master:**
+```bash
+kubectl get secrets -n argocd -l argocd.argoproj.io/secret-type=repository
+# NAME                                          TYPE     DATA   AGE
+# argocd-ansible-github-secret-github-secret   Opaque   5      21h
+# gitops-ansible-github-secret-github-secret   Opaque   5      21h
+```
+(Both secret names are double-suffixed — `...-github-secret-github-secret` — because whoever set `ARGO_SECRET_NAME`/`GITOPS_SECRET_NAME` in that `.env` already included `-github-secret` in the value itself, and the template appends `-github-secret` again. Cosmetic only, not a functional problem.)
+
+```bash
+kubectl get secret argocd-ansible-github-secret-github-secret -n argocd -o jsonpath='{.data.url}' | base64 -d
+# https://github.com/GlobalyHub/GH-infra-and-k8s-charts-central.git   ← correct, this one's fine
+
+kubectl get secret gitops-ansible-github-secret-github-secret -n argocd -o jsonpath='{.data.username}' | base64 -d
+# agentcisapp-argocd-token   ← wrong: agentcis's token identity, not a new orderlay one
+
+kubectl get secret gitops-ansible-github-secret-github-secret -n argocd -o jsonpath='{.data.url}' | base64 -d
+# https://github.com/GlobalyHub/GH-infra-and-k8s-charts-central.git   ← wrong: same URL as the ARGO secret above
+```
+
+**Finding**: the Secret meant to give orderlay's ArgoCD read access to `gitops-orderlay-deployments` was actually created pointing at `GH-infra-and-k8s-charts-central.git` — not even agentcis's app repo, but the *infra* repo, identical to the `argocd-ansible` secret. This means whoever ran the Ansible playbook against orderlay's inventory that day had `.env`'s `GITOPS_REPO_URL` set equal to `ARGO_REPO_URL` (both pointing at charts-central) rather than pointing it at `gitops-orderlay-deployments.git`. **As of this addendum, orderlay's ArgoCD has zero working credential for its own app-workload repo.**
+
+---
+
+### 11.10 The fix (identified, not yet applied as of this addendum)
+
+Two independent things are needed:
+
+1. **A real Git credential** with read access to `gitops-orderlay-deployments` — a new fine-grained GitHub PAT scoped to just that repo (mirroring agentcis's own dedicated `agentcisapp-argocd-token` convention), not yet created as of this writing.
+2. **Fix the Secret**, either or both of:
+   - **Immediate/direct** (`kubectl apply` on the orderlay master, replacing the Secret in place):
+     ```yaml
+     apiVersion: v1
+     kind: Secret
+     metadata:
+       name: gitops-ansible-github-secret-github-secret
+       namespace: argocd
+       labels:
+         argocd.argoproj.io/secret-type: repository
+     stringData:
+       type: git
+       name: ansible-applied-repo-secret
+       url: https://github.com/GlobalyHub/gitops-orderlay-deployments.git
+       username: <new-token-identity>
+       password: <the-real-PAT>
+     ```
+   - **Durable** — fix `ansible-config-mgmt/.env`'s `GITOPS_REPO_URL`/`REPO_USERNAME`/`REPO_TOKEN`, then re-run `make orderlay-staging-setup-argocd`.
+
+**The trap to avoid**: doing only the direct `kubectl apply` fix without also fixing `.env` means the *next* time anyone re-runs that Makefile target against orderlay (for any reason — it's not a repo-secret-only target, it re-runs the whole ArgoCD setup chain), Ansible will silently overwrite the manual fix back to the broken state, since `.env` is still wrong. This is the same "edited but not actually applied / applied but not actually source-of-truth" trap flagged repeatedly in the companion Terraform note (`ORDERLAY_TERRAFORM_BOOTSTRAP_IAM_AND_ASG_LIFECYCLE_NOTES.md`, Mistake 1), just inverted — there the *file* was fixed but not *pushed*; here the *cluster* would be fixed but not the *file that regenerates cluster state*.
+
+**Verification once fixed**, in order of strength:
+```bash
+# 1. Shape check
+kubectl get secret gitops-ansible-github-secret-github-secret -n argocd -o jsonpath='{.data.url}' | base64 -d
+# should now print gitops-orderlay-deployments.git
+
+# 2. Real proof — an actual authenticated connection test
+argocd repo list
+# look for gitops-orderlay-deployments with Connection Status: Successful
+
+# 3. Fallback if argocd CLI isn't available on that box
+kubectl logs -n argocd deploy/argocd-repo-server --tail=200 | grep -i "orderlay-deployments"
+```
+
+---
+
+### 11.11 File-by-file state of `gitops-orderlay-deployments` at end of session (2026-09-11)
+
+Deliberately scoped to **staging only, infra layer only** — no app-workload Applications (`services/`, `persistent-volume/`, `external-service/`) have been added yet, by explicit decision: the CI/CD pipeline that would push real image tags into this repo hasn't been built yet, and the stated plan is to prove the infra layer works end-to-end first, then build the pipeline, then start adding app files here.
+
+| File | Status | Notes |
+|---|---|---|
+| `bootstrap/staging-root.yml` | ✅ Done | Matches agentcis exactly: `project: default`, `targetRevision: "live-values"`, unlimited retry policy |
+| `bootstrap/production-root.yml`, `development-root.yml` | ⚪ Empty | Correct for staging-only scope right now |
+| `projects/orderlay.yml` | 🗑️ Deleted | Was a scoped AppProject; removed for parity with agentcis's `default`-only live setup (§11.3) |
+| `apps/staging/pre-apps/aws-crd-and-controller.yml` | 🟡 Mostly done | `finalizers` deliberately commented (test phase); `repoURL` on the `aws-load-balancer-controller` Application's second source **still wrong** — points at `gitops-agentcisapp-deployments.git`, needs to be this repo |
+| `gitops-values/staging/others/gateway-api-aws.yml` | 🟡 Mostly done | Real `vpcId`/`region`/role ARN in place (§11.5/§11.7); `clusterName` still says `default-cluster`; `nodeAffinity` block still present despite the decision to drop it (§11.6); agentcis's old troubleshooting comments still present (cosmetic) |
+| `apps/staging/application/manifest/gw-class.yml` | ✅ Done | Fixed `controllerName` to the confirmed-correct `gateway.k8s.aws/alb`, matches agentcis |
+| `apps/staging/application/manifest/certificate-issuer.yml` | 🟡 Works, one open risk | Byte-identical to agentcis's file; still points at the **production** ACME endpoint — rate-limit risk during repeated test-phase apply/delete cycles, recommended switch to staging endpoint not yet made |
+| `apps/staging/public-traffic/aws-gw-orderlay-parent.yml` | ❌ Empty (0 bytes) | Not started. This is the file that would actually create the real ALB — highest-value next step to prove the infra chain end-to-end, since it doesn't need any real backend service to test (a Gateway with listeners and no routes is enough to prove provisioning works) |
+| `apps/staging/public-traffic/aws-gw-orderlay-microservice.yml` | ❌ Empty (0 bytes) | Not started; inherently needs a real backend service to be meaningful, so correctly deferred until the pilot service exists |
+| `apps/staging/application/0-waiting-job.yml` | ⚪ Placeholder | Fine as-is until a real migration/init job is needed |
+| `apps/staging/application/{services,persistent-volume,cron-jobs}/` | ❌ Empty directories | Deliberately deferred — no CI/CD pipeline wired to this repo yet (§8 above), by direct decision this session |
+| `apps/staging/external-service/` | ❌ Doesn't exist yet | Deferred, correctly last per the original roadmap (§8) |
+| ArgoCD repo-credential Secret for this repo | 🔴 **Broken, live** | Points at the wrong repo entirely (§11.9) — see §11.10 for the fix, not yet applied |
+| `live-values` branch | ❌ Doesn't exist yet | Accepted forward-reference (§11.4) — to be created once the file structure above is finished |
+
+---
+
+*Companion reading (updated): `note/ORDERLAY_TERRAFORM_BOOTSTRAP_IAM_AND_ASG_LIFECYCLE_NOTES.md` (server/IAM side — §11.5 of this addendum directly corrects an over-cautious reading of that note's `oidc_create` discussion), `note/ORDERLAY_ARGOCD_INSTALL_AND_APP_OF_APPS_NOTES.md` (the original ArgoCD-install run), `note/ORDERLAY_ARGOCD_APP_OF_APPS_CASCADE_DIAGRAM.html` (visual version of §4).*
