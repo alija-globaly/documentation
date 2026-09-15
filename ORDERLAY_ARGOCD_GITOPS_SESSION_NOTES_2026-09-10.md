@@ -459,12 +459,15 @@ flowchart LR
 
 ## 9. Open / unclear items
 
-- **Pilot service not yet decided.** `backend_v2` was proposed (core API, proves the pattern where it matters most) vs. `web-v2` (simpler runtime, lower blast radius) vs. `notification-service` (smallest, safest to break). Not yet chosen. As of the 2026-09-11 addendum (§11), this is now deliberately deferred until the infra layer (§11) is proven — see §11.1.
+- ~~Pilot service not yet decided~~ **Superseded 2026-09-13**: rather than pick one pilot, all 7 real services got their `Application`+values pairs built at once (§14.4) — `backend-v2`, `web-v2`, `back-office`, `website-v2`, `notification-service`, `brevo-integration-service`, `nepbooks-integration-service`. Still not applied to the cluster yet (§14.8).
 - **Repo-creation approach** — resolved: `gitops-orderlay-deployments` was created on GitHub on 2026-09-11 and is being built out directly (branch `alija-init-gitops-structure`), no placeholder-URL drafting phase was needed.
-- **Whether the generic `backend` chart truly fits every orderlay service as-is**, or whether services with different runtime needs (e.g. `order-service`'s gRPC port 8089, `web-v2`'s Next.js build) will need chart tweaks — still not verified; unchanged, still pending until pilot service work starts.
-- **How ArgoCD gets credentials for the new `gitops-orderlay-deployments` repo** — mechanism identified (§11.9): the existing `1.2-repo-secret-setup.yml` ansible task, not a new `argocd repo add`. **As of 2026-09-11 this is a live, unresolved blocker** — see §11.9–§11.10 for the exact bug found and the fix path.
+- ~~Whether the generic `backend` chart truly fits every orderlay service as-is~~ **Resolved 2026-09-13** (§14.4): confirmed per-service, grounded in each one's real source code — `frontend` chart for the 3 Next.js apps, `backend` chart for everything else, `httproute.enabled: false` for the 3 internal-only services. One real fix needed along the way: `backend_v2` needs `pm2-runtime`, not `pm2`, to run correctly as a container's foreground process.
+- ~~How ArgoCD gets credentials for the new `gitops-orderlay-deployments` repo~~ **Resolved 2026-09-12**: mechanism was `1.2-repo-secret-setup.yml`'s shared, non-project-scoped `.env` (§11.9); fix applied and proven working via a real `git ls-remote` test from inside `argocd-repo-server` itself (§12.5b). agentcis's existing token turned out to already have access — no new PAT needed.
 - Everything in this note covers **staging only**; production for orderlay is a later, separate phase once staging is proven, same as agentcis-app's own history.
 - **New, from the addendum**: the ingress mechanism itself changed from the plan in §2/§6/§7 above — see §11.2. Those sections are kept as-written for historical accuracy (they reflect the reasoning at the time), but their conclusion ("orderlay doesn't need agentcis's ALB/Gateway API machinery") is superseded.
+- **New, 2026-09-12 (§13.2)**: a real domain + AWS ACM certificate for orderlay-staging doesn't exist yet — needed before the Gateway file (now `apps/staging/public-traffic/aws-gw-orderlay.yml`, renamed §14.7) can be finished. **Still open as of 2026-09-13** — pending an access request to the user's senior (§10 of the companion install note).
+- **New, 2026-09-13 (§14.8), urgent**: `live-values` branch exists but is stale — created before all of today's service-file work, none of which has been committed or pushed yet. Do this before anything else.
+- **New, 2026-09-13 (§14.9)**: two genuinely open decisions — whether `order-service` is bundled inside `backend_v2`'s own pod or simply not deployed yet (no separate deployment exists in production), and whether `website-v2` (a real but currently-orphaned migration, §14.5) belongs in this GitOps buildout at all.
 
 ---
 
@@ -631,10 +634,10 @@ enableWafv2: false
 logLevel: info
 ```
 
-**As actually committed to the repo as of this addendum, three things from this recommendation were not yet applied**, worth fixing on the next pass:
-- `clusterName` is still literally `default-cluster` (copied verbatim from agentcis, never updated to `orderlay-staging`). Low severity — this is just a tracking tag AWS puts on ALB/target-group resources, and since orderlay is a separate AWS account it wouldn't collide with anything — but it's sloppy and worth fixing for clarity.
-- The `nodeAffinity` block discussed in §11.6 is **still present** in the file as committed — the decision to drop it was made and agreed, but the edit hadn't landed as of the last file check this session.
-- agentcis's own troubleshooting-history comments (informal notes in Nepali/English about a service-creation issue they'd hit) are still present verbatim. Cosmetic only, but confusing noise in a fresh orderlay file.
+**As actually committed to the repo as of this addendum, three things from this recommendation were flagged as "not yet applied" — two of those were later found (2026-09-12, §12.9) to not need changing at all:**
+- ~~`clusterName` is still literally `default-cluster`...~~ **Corrected 2026-09-12**: checked agentcis's own real `live-values` file directly — it *also* says `clusterName: default-cluster`, unmodified, in actual production use. Not a placeholder left unfinished; this is the org's real convention. No change needed. See §12.9.
+- The `nodeAffinity` block discussed in §11.6 is **still present** in the file as committed — the decision to drop it was made and agreed, but the edit hadn't landed as of the last file check this session. **Applied 2026-09-12** — see §12.9.
+- agentcis's own troubleshooting-history comments (informal notes in Nepali/English about a service-creation issue they'd hit) are still present verbatim, **and were deliberately left in** (2026-09-12) rather than cleaned up — agentcis's own live file carries the exact same comments, so this is consistent with the file they're mirrored from, not noise.
 
 `enableServiceMutatorWebhook: false` was deliberately kept as-is (not re-enabled) since the reason agentcis disabled it isn't known — safer to inherit than guess, revisit only if `TargetGroupBinding` issues show up later.
 
@@ -655,7 +658,7 @@ spec:
 ```
 This fix has been applied and confirmed in the repo.
 
-**`certificate-issuer.yml`** — now byte-identical to agentcis's real file, including the **production** Let's Encrypt ACME endpoint (`acme-v02.api.letsencrypt.org`) and agentcis's real email. Flagged risk, **still unresolved as of this addendum**: Let's Encrypt's production endpoint rate-limits to 5 certificates per exact domain per week. Since this `ClusterIssuer` is likely to be deleted/reapplied repeatedly while testing ArgoCD sync behavior (matching the explicit "we are in test phase, finalizers left commented so it's easy to delete" stance taken this session, §11.9 note below), hitting that limit is a real risk that would then block real cert issuance later. Recommended (not yet applied): switch to `acme-staging-v02.api.letsencrypt.org` until the plumbing is proven, then switch to production for real TLS.
+**`certificate-issuer.yml`** — byte-identical to agentcis's real file, including the **production** Let's Encrypt ACME endpoint (`acme-v02.api.letsencrypt.org`) and agentcis's real email. **Correction, 2026-09-12 (§12.9)**: this was originally flagged as a bug — a `ClusterIssuer` named `lets-encrypt-staging` pointing at LE's *production* server looked like a mistake. Checked agentcis's own real staging **and** production `certificate-issuer.yml` directly: both use the production ACME endpoint (the staging endpoint is left in as a commented-out alternative in both). **`-staging`/`-production` in this naming convention refers to the K8s environment the ClusterIssuer is deployed to, not the ACME server tier** — agentcis deliberately issues real, trusted certs in both environments. Not a bug; orderlay now matches this exactly. The one genuinely orthogonal, still-real consideration: Let's Encrypt's production endpoint rate-limits to 5 certificates per exact domain per week, which matters only if this `ClusterIssuer`/its `Certificate` gets deleted and recreated many times during this round of infra-proving — worth keeping in mind operationally, but not a reason to deviate from agentcis's convention.
 
 **On `finalizers`**: both `Application` objects in `pre-apps/aws-crd-and-controller.yml` have `finalizers: [resources-finalizer.argocd.argoproj.io/background]` commented out, same as originally scaffolded. This was raised as a possible parity gap with agentcis (whose real file has them active) but **deliberately left commented, by direct decision**: the project is in an active test phase where these Applications may need to be deleted and recreated, and the finalizer would force a cascading delete of everything the Application created (CRDs, the controller deployment) on every such delete — undesirable friction while iterating. Revisit once past the test phase.
 
@@ -752,10 +755,10 @@ Deliberately scoped to **staging only, infra layer only** — no app-workload Ap
 | `bootstrap/staging-root.yml` | ✅ Done | Matches agentcis exactly: `project: default`, `targetRevision: "live-values"`, unlimited retry policy |
 | `bootstrap/production-root.yml`, `development-root.yml` | ⚪ Empty | Correct for staging-only scope right now |
 | `projects/orderlay.yml` | 🗑️ Deleted | Was a scoped AppProject; removed for parity with agentcis's `default`-only live setup (§11.3) |
-| `apps/staging/pre-apps/aws-crd-and-controller.yml` | 🟡 Mostly done | `finalizers` deliberately commented (test phase); `repoURL` on the `aws-load-balancer-controller` Application's second source **still wrong** — points at `gitops-agentcisapp-deployments.git`, needs to be this repo |
-| `gitops-values/staging/others/gateway-api-aws.yml` | 🟡 Mostly done | Real `vpcId`/`region`/role ARN in place (§11.5/§11.7); `clusterName` still says `default-cluster`; `nodeAffinity` block still present despite the decision to drop it (§11.6); agentcis's old troubleshooting comments still present (cosmetic) |
+| `apps/staging/pre-apps/aws-crd-and-controller.yml` | ✅ Done | `finalizers` deliberately commented (test phase); `repoURL` on the `aws-load-balancer-controller` Application's second source now correctly points at `gitops-orderlay-deployments.git` — confirmed fixed as of 2026-09-12 (was outstanding as of the original addendum) |
+| `gitops-values/staging/others/gateway-api-aws.yml` | ✅ Done | Real `vpcId`/`region`/role ARN in place (§11.5/§11.7); `clusterName: default-cluster` and agentcis's informal comments kept deliberately (confirmed to match agentcis's own real convention, §12.9); `nodeAffinity` block removed 2026-09-12 (§12.9) |
 | `apps/staging/application/manifest/gw-class.yml` | ✅ Done | Fixed `controllerName` to the confirmed-correct `gateway.k8s.aws/alb`, matches agentcis |
-| `apps/staging/application/manifest/certificate-issuer.yml` | 🟡 Works, one open risk | Byte-identical to agentcis's file; still points at the **production** ACME endpoint — rate-limit risk during repeated test-phase apply/delete cycles, recommended switch to staging endpoint not yet made |
+| `apps/staging/application/manifest/certificate-issuer.yml` | ✅ Done | Byte-equivalent to agentcis's file, production ACME endpoint confirmed intentional/correct (§12.9), not a rate-limit bug — `-staging` in the name refers to K8s environment, not ACME tier |
 | `apps/staging/public-traffic/aws-gw-orderlay-parent.yml` | ❌ Empty (0 bytes) | Not started. This is the file that would actually create the real ALB — highest-value next step to prove the infra chain end-to-end, since it doesn't need any real backend service to test (a Gateway with listeners and no routes is enough to prove provisioning works) |
 | `apps/staging/public-traffic/aws-gw-orderlay-microservice.yml` | ❌ Empty (0 bytes) | Not started; inherently needs a real backend service to be meaningful, so correctly deferred until the pilot service exists |
 | `apps/staging/application/0-waiting-job.yml` | ⚪ Placeholder | Fine as-is until a real migration/init job is needed |
@@ -808,4 +811,484 @@ Side-by-side, so the contrast is explicit:
 
 ---
 
-*Companion reading (updated): `note/ORDERLAY_TERRAFORM_BOOTSTRAP_IAM_AND_ASG_LIFECYCLE_NOTES.md` (server/IAM side — §11.5 of this addendum directly corrects an over-cautious reading of that note's `oidc_create` discussion), `note/ORDERLAY_ARGOCD_INSTALL_AND_APP_OF_APPS_NOTES.md` (the original ArgoCD-install run), `note/ORDERLAY_ARGOCD_APP_OF_APPS_CASCADE_DIAGRAM.html` (visual version of §4).*
+## 12. Session Addendum (2026-09-12): Fixing the Broken Repo-Credential Secret
+
+> **Context:** picks up immediately from §11.9–§11.10 — the diagnosis that orderlay's ArgoCD had a Git-credential Secret pointing at the wrong repo entirely. This section is the fix, run live, with the actual command output and screenshots reviewed line by line. **`note/ORDERLAY_ARGOCD_INSTALL_AND_APP_OF_APPS_NOTES.md` §10 now carries a self-contained summary of this same incident**, aimed at a reader of that note who hasn't seen this one.
+
+### 12.1 TL;DR of this addendum
+
+1. **`.env` was corrected**: `GITOPS_REPO_URL` now points at `gitops-orderlay-deployments.git` instead of duplicating `ARGO_REPO_URL`; the redundant `-github-secret` baked into `GITOPS_SECRET_NAME`/`ARGO_SECRET_NAME` was also trimmed.
+2. **Re-running `make orderlay-staging-setup-argocd` created brand-new Secret objects** (because the secret *names* changed) rather than updating the old, broken ones in place — the cluster now carries 2 orphaned dead Secrets alongside the 2 real ones. Both types are visible in `kubectl get secrets`, and it's easy to accidentally check the wrong one (which is exactly what happened on the first verification pass — see §12.3).
+3. **Verified: the URL is now correct.** `gitops-ansible-github-secret`'s `.data.url` decodes to `gitops-orderlay-deployments.git`.
+4. **Resolved.** `.data.username` still decodes to `agentcisapp-argocd-token` — agentcis's own token identity, never swapped for an orderlay-dedicated one — but a real `git ls-remote` test, run from inside the `argocd-repo-server` pod using the exact stored credential, returned live ref data (§12.5b). That token already has access to this repo. **Status: fully fixed and proven, no new PAT needed.**
+5. A separate, unrelated Helm-upgrade error (`argocd-cm` ConfigMap field-manager conflict) surfaced during the rerun — noted, non-blocking, deferred.
+
+### 12.2 The fix applied, exactly
+
+```diff
+  ansible-config-mgmt/.env
+
+- GITOPS_SECRET_NAME=gitops-ansible-github-secret
+- ARGO_SECRET_NAME=argocd-ansible-github-secret
++ GITOPS_SECRET_NAME=gitops-ansible
++ ARGO_SECRET_NAME=argocd-ansible
+
+  ARGO_REPO_URL=https://github.com/GlobalyHub/GH-infra-and-k8s-charts-central.git   (unchanged — already correct)
+- GITOPS_REPO_URL=https://github.com/GlobalyHub/GH-infra-and-k8s-charts-central.git
++ GITOPS_REPO_URL=https://github.com/GlobalyHub/gitops-orderlay-deployments.git
+```
+
+`REPO_USERNAME`/`REPO_TOKEN` were **not** changed in this pass — still agentcis's own values. This turns out to matter (§12.5).
+
+### 12.3 The rerun, and what it actually did
+
+```bash
+make orderlay-staging-setup-argocd
+```
+
+Relevant lines from the run log (`rerun-ansible.txt`):
+
+```
+D. Apply Kubernetes manifest...
+  13.202.199.21 done | stdout: secret/argocd-ansible-github-secret created
+secret/gitops-ansible-github-secret created
+...
+2.0 A. Copying manifest to remote system...
+B. Apply Kubernetes manifest...
+  13.202.199.21 done | stdout: application.argoproj.io/000-super-root-000 configured
+...
+- Play recap -
+  13.202.199.21              : ok=29   changed=16   unreachable=0    failed=0    rescued=0    ignored=0
+```
+
+Note the secret names created this time are **single-suffixed** (`gitops-ansible-github-secret`), matching the `.env` cleanup — not the old double-suffixed ones. Since `metadata.name` is part of a Kubernetes object's identity, this rename made `kubectl apply` **create new objects**, not update the old ones. Confirmed live:
+
+```bash
+kubectl get secrets -n argocd -l argocd.argoproj.io/secret-type=repository
+NAME                                          TYPE     DATA   AGE
+argocd-ansible-github-secret                  Opaque   5      84s    ← new, from this run
+argocd-ansible-github-secret-github-secret    Opaque   5      38h    ← old, orphaned, untouched
+gitops-ansible-github-secret                  Opaque   5      84s    ← new, from this run — THE one that matters now
+gitops-ansible-github-secret-github-secret    Opaque   5      38h    ← old, orphaned, still wrong, harmless leftover
+```
+
+**A verification mistake happened right here, worth recording**: the first check run against this state decoded `gitops-ansible-github-secret-github-secret` (the 38h-old orphan) — unsurprisingly it still showed the old, wrong URL, since nothing that run touched it. The lesson: **after any Secret rename, always re-run `kubectl get secrets -l argocd.argoproj.io/secret-type=repository` first** to see which objects actually exist now, rather than assuming the name you expect is the only one there.
+
+### 12.4 Correct verification, against the right object
+
+```bash
+kubectl get secret gitops-ansible-github-secret -n argocd -o jsonpath='{.data.url}' | base64 -d
+# https://github.com/GlobalyHub/gitops-orderlay-deployments.git   ✅ correct now
+
+kubectl get secret gitops-ansible-github-secret -n argocd -o jsonpath='{.data.username}' | base64 -d
+# agentcisapp-argocd-token   ❌ still agentcis's own token identity
+```
+
+### 12.5 Why "the URL is right" is not the same as "this works"
+
+`kubectl get secret ... | base64 -d` only proves **what was saved**, not that GitHub will actually accept that token when `argocd-repo-server` tries to clone `gitops-orderlay-deployments.git`. `REPO_USERNAME`/`REPO_TOKEN` were never changed away from agentcis's own credential in this pass — so the real open question is: **does agentcis's fine-grained PAT happen to also have read access to `gitops-orderlay-deployments`?** Unknown as of this writing. Two ways to actually resolve this, neither yet done:
+
+1. **Check on GitHub** whether the existing token (`agentcisapp-argocd-token`) already has `gitops-orderlay-deployments` in its repository access list — if yes, nothing more to do.
+2. **If not**, generate a dedicated orderlay-specific fine-grained PAT (scoped to both `GH-infra-and-k8s-charts-central` and `gitops-orderlay-deployments`, per the original plan in §11.10), update `REPO_USERNAME`/`REPO_TOKEN` in `.env`, and re-run.
+
+Either way, the actual proof is an active connection test, not a decoded field:
+```bash
+argocd repo list
+# look for gitops-orderlay-deployments.git with Connection Status: Successful
+```
+This has **not been run yet**. Also worth remembering (established in §11.12): checking `kubectl logs -n argocd deploy/argocd-repo-server | grep -i "orderlay-deployments"` is **not** a valid substitute — it came back empty during this session, but that's a non-signal, not a good sign, since nothing in the cluster yet has an `Application` whose `sources:` reference this repo (only `pre-apps/aws-crd-and-controller.yml` exists there so far, per §11.11's file table) — there's simply been no reason for `repo-server` to attempt a fetch at all yet.
+
+### 12.5b Resolved — real connection test passed
+
+Ran the direct proof from §12.5, exec'd straight into the `argocd-repo-server` pod using the actual decoded Secret values:
+
+```bash
+GITOPS_URL=$(kubectl get secret gitops-ansible-github-secret -n argocd -o jsonpath='{.data.url}' | base64 -d)
+GITOPS_USER=$(kubectl get secret gitops-ansible-github-secret -n argocd -o jsonpath='{.data.username}' | base64 -d)
+GITOPS_TOKEN=$(kubectl get secret gitops-ansible-github-secret -n argocd -o jsonpath='{.data.password}' | base64 -d)
+AUTH_URL=$(echo "$GITOPS_URL" | sed "s#https://#https://${GITOPS_USER}:${GITOPS_TOKEN}@#")
+kubectl exec -n argocd deploy/argocd-repo-server -- git ls-remote "$AUTH_URL"
+```
+
+Result — real ref data, not an error:
+```
+023bcef427e429220963165915de812ccfa0a67a        HEAD
+9f4ceb5d6ca62b1f16949a5d61b0610e262470bd        refs/heads/alija-init-gitops-structure
+023bcef427e429220963165915de812ccfa0a67a        refs/heads/main
+```
+
+(First attempt at this test gave a false negative — `GITOPS_TOKEN` had been left unset in that shell session, so the built URL had a blank password and failed authentication for that reason alone, not because the real token was bad. Worth remembering: always sanity-check a variable actually got populated, e.g. `echo ${#GITOPS_TOKEN}`, before trusting a negative result from a multi-variable command chain.)
+
+**Conclusion, definitively**: `agentcisapp-argocd-token` (agentcis's own existing credential) already has read access to `gitops-orderlay-deployments` — whoever originally scoped that token did so broadly enough (org-wide or explicitly multi-repo) to cover it. **No new dedicated orderlay-specific PAT is needed.** The repo-credential misconfiguration from §11.9 is now fully resolved, not just URL-corrected — both the destination and the identity are proven working, via the exact mechanism (`git`, inside the exact pod) that ArgoCD's real reconcile loop uses. Also confirms, as a side effect: **`live-values` genuinely doesn't exist yet** in this repo (absent from the ref list above) — matches the already-accepted plan in §11.4 to create it once the file structure is finished.
+
+### 12.9 Correcting an earlier assessment: `clusterName` and the ACME endpoint were never bugs
+
+§11.7's "not yet applied" list (quoted above, now struck through) treated `clusterName: default-cluster` and the production ACME endpoint in `certificate-issuer.yml` as unfinished cleanup. Checked agentcis's real `live-values` files directly before acting on that — both turned out to be wrong calls:
+
+- `gitops-agentcisapp-deployments` (branch `live-values`) → `gitops-values/staging/others/gateway-api-aws.yml` has `clusterName: default-cluster` too, in real, current production use. It's just an AWS resource tag the Load Balancer Controller stamps on ALBs/target groups it creates — harmless to share the same literal string across two entirely separate AWS accounts (`381491939487` vs `834033184010`), since each controller only ever sees resources in its own account.
+- Both agentcis's staging **and** production `certificate-issuer.yml` use the **production** Let's Encrypt endpoint, with the staging endpoint left in as a commented-out alternative in both:
+  ```yaml
+  #server: https://acme-staging-v02.api.letsencrypt.org/directory
+  server: https://acme-v02.api.letsencrypt.org/directory
+  ```
+  **Corrected understanding**: `-staging`/`-production` in these filenames/resource names refers to *which K8s environment* the ClusterIssuer belongs to, not which ACME server tier it talks to. Both of agentcis's environments deliberately issue real, trusted certificates. Not a bug to fix — orderlay's file already matched this convention.
+
+**What was actually changed, 2026-09-12:**
+- `gitops-values/staging/others/gateway-api-aws.yml`: removed the `affinity.nodeAffinity` block (and its two preceding comment lines) — this one *was* a real fix, independently confirmed dead code via live `kubectl get nodes -l role=aws-elb-master` on agentcis's own cluster (§11.6). Everything else in the file — `clusterName`, the informal Nepali/English comments, `region`/`vpcId`/role-arn (correctly orderlay's own) — left exactly as-is, now genuinely matching agentcis's real file by deliberate choice, not by unfinished copy-paste.
+- `apps/staging/application/manifest/certificate-issuer.yml`: added back the commented-out `acme-staging-v02` line for exact parity with agentcis's file (documentation of the alternative, not an active change) — the active `server:` line (production endpoint) was already correct and untouched.
+
+Both files are now considered **done**, matching agentcis's real convention deliberately rather than needing further cleanup. Updated in §11.11's file table below.
+
+### 12.6 Housekeeping still pending
+
+- Delete the two orphaned double-suffixed Secrets once §12.5's connection test passes: `kubectl delete secret argocd-ansible-github-secret-github-secret gitops-ansible-github-secret-github-secret -n argocd`. Not urgent — they're inert, just clutter.
+- Decide and resolve §12.5's open credential question before applying anything in `gitops-orderlay-deployments` that would actually depend on this Secret (i.e. before wiring up `staging-root.yml` for real).
+
+### 12.7 Separately flagged: an unrelated Helm-upgrade error in the same rerun
+
+```
+level=WARN msg="upgrade failed" name=argocd error="conflict occurred while applying object argocd/argocd-cm /v1, Kind=ConfigMap: Apply failed with 1 conflict: conflict with \"kubectl-client-side-apply\" using v1: .data.timeout.reconciliation"
+Error: UPGRADE FAILED: conflict occurred while applying object argocd/argocd-cm ...
+```
+The `helm upgrade --install argocd` step (§3 of the companion install note) failed this run — a field-manager ownership conflict on the `argocd-cm` ConfigMap's `timeout.reconciliation` key, most likely because that field was previously set via a plain `kubectl apply` (client-side) at some point, and Helm's server-side apply now refuses to claim a field it doesn't believe it owns. **This did not block the rest of the playbook** — the final recap showed `failed=0`, and both the repo-secret task and the `super-root.yml` re-apply completed normally afterward. Not investigated further this session since it isn't blocking today's work; worth a dedicated look before the next time ArgoCD's own Helm values actually need to change.
+
+---
+
+## 13. Session Addendum (2026-09-12, continued): The Infra-Layer Punch List, and Understanding `certificate-issuer.yml`/ACME from First Principles
+
+> **Context:** same day as §12, picking up right after the credential fix was proven working (§12.5b). This section covers two things: (a) a live, file-by-file punch list of what's actually left before the infra layer (pre-apps + manifest + public-traffic) is provably complete, and (b) a full from-scratch explainer of what `certificate-issuer.yml` does and why — written because the earlier, denser explanation (§12.9) assumed too much prior knowledge of TLS/ACME to actually clear up the confusion.
+
+### 13.1 TL;DR
+
+1. **The infra-layer punch list, verified against the live repo, not the note**: everything in `pre-apps/` and `application/manifest/` is now genuinely done (§12.9's corrections held up). **One real, new blocker was found**: `apps/staging/public-traffic/aws-gw-orderlay-parent.yml` (the file that would create the actual Gateway/ALB) is still empty, and finishing it needs a **real ACM certificate ARN** for a real domain — an AWS-side action + a naming decision, not a file edit. See §13.2.
+2. **What `ClusterIssuer` actually is, from zero**: not a certificate itself — a reusable "how to talk to a Certificate Authority" profile that `cert-manager` uses whenever something (a `Certificate`, or an annotated `Ingress`) asks for one. See §13.3.
+3. **The HTTP-01 challenge, mechanically**: Let's Encrypt gives cert-manager a token; cert-manager auto-creates a temporary Ingress rule serving that token at a fixed URL path; Let's Encrypt's own servers hit that URL from the public internet; if they get the right answer, that's proof of domain control. This is *why* a real domain with DNS actually pointing at the cluster is a hard prerequisite — not paperwork, a live network check. See §13.4.
+4. **Why two ACME "tiers" exist**: not a quality difference — a rate-limit one. Production Let's Encrypt allows 5 certs/exact-domain-set/week (real, trusted certs); staging is the same protocol against an intentionally-untrusted chain, with much looser limits, specifically so you can hammer it while debugging the plumbing. See §13.5.
+5. **Recommendation for this specific, first-time setup**: temporarily use the staging ACME endpoint until a `Certificate` for orderlay's real domain reaches `Ready`, *then* flip to production (matching agentcis) for real. This doesn't contradict §12.9's "match agentcis" conclusion — that was about whether the *existing* config was a bug (it wasn't); this is a separate, forward-looking operational recommendation for proving new plumbing for the first time. See §13.7.
+6. **Current live state of `certificate-issuer.yml`, as of this note update**: back to a single active `server:` line pointing at the production endpoint, with no commented alternative — the parity-edit from §12.9 (which added the commented staging line back) was subsequently removed again. Noting this as the current, deliberate state, not reverting it.
+
+### 13.2 The infra-layer punch list, re-verified live
+
+| Item | Status | Notes |
+|---|---|---|
+| `pre-apps/aws-crd-and-controller.yml` repoURL | ✅ Done | Confirmed correct (§12's earlier check) |
+| `gateway-api-aws.yml`: `clusterName`, informal comments | ✅ Done — no change needed | Confirmed to match agentcis's own real convention (§12.9) |
+| `gateway-api-aws.yml`: `nodeAffinity` block | ✅ Removed | Confirmed dead code independently (§11.6), removed 2026-09-12 |
+| `application/manifest/gw-class.yml` | ✅ Done | `controllerName` matches agentcis |
+| `application/manifest/certificate-issuer.yml` | ✅ Done, content is intentional | See §13.8 for its exact current state |
+| **A real domain + ACM certificate ARN for orderlay-staging** | ❌ **Open, new finding** | Needed by `aws-gw-orderlay-parent.yml`'s values (`gateway.https_mode.aws_alb_config.defaultCertificate`, mirroring agentcis's real file, which references a pre-existing ACM cert for `mainapp.agentcis.com`). Nothing in this GitOps repo *creates* this certificate — it only references one that must already exist, issued and validated in AWS Certificate Manager, in orderlay's own account/region (`381491939487`/`ap-south-1`). This requires a domain decision (what hostname will orderlay-staging's Gateway actually serve?) plus an AWS Console/CLI action (request the cert, complete DNS validation in Route53) — **neither of which can be done from inside this repo alone.** |
+| `apps/staging/public-traffic/aws-gw-orderlay-parent.yml` + its values file | ❌ Empty | Blocked on the item above — this is the file that actually creates the Gateway/ALB, and is the highest-value remaining step to prove the whole infra chain end-to-end (a Gateway with listeners and no routes yet is enough to prove provisioning works, per §11.11) |
+| `apps/staging/public-traffic/aws-gw-orderlay-microservice.yml` | ❌ Empty, correctly deferred | Needs a real backend service to be meaningful — out of scope for "infra only" |
+| `live-values` branch | ❌ Doesn't exist yet | Create from `alija-init-gitops-structure` once the above is resolved, then apply `staging-root.yml` on the master (§10 of the companion install note has the full sequencing reasoning) |
+
+### 13.3 What a `ClusterIssuer` actually is — from zero
+
+Why any of this exists: a browser trusts a site over HTTPS only if a recognized Certificate Authority (CA) has signed a certificate vouching "whoever holds this certificate's private key really does control this domain." Historically that verification was manual — request, prove ownership by hand, wait, install, repeat before expiry (a very common real outage cause: an expired cert nobody renewed in time).
+
+**Let's Encrypt** (2015) made this free *and* fully automatable via a protocol called **ACME** (RFC 8555) — a program, not a human, proves domain ownership and requests the cert. Let's Encrypt certificates are deliberately short-lived (90 days) specifically to force automation rather than rely on a human remembering to renew.
+
+A **`ClusterIssuer`** is **not a certificate** — it's a reusable, cluster-wide "account profile" that tells `cert-manager` (already running as pods on the cluster, alongside `ingress-nginx`) *which* CA to talk to, using *which* email, and *how* to prove domain ownership to them. `Certificate` objects (or an `Ingress`/`HTTPRoute` simply annotated with `cert-manager.io/cluster-issuer: <name>`) then reference a `ClusterIssuer` by name whenever they want an actual certificate issued.
+
+### 13.4 The HTTP-01 challenge — how automated domain-proof actually works
+
+The file's `solvers: [http01: { ingress: { class: nginx } }]` block is the mechanism, step by step:
+
+1. cert-manager tells Let's Encrypt "I want a certificate for `<domain>`"
+2. Let's Encrypt replies with a random token: "put this exact content at `http://<domain>/.well-known/acme-challenge/<token>`, then tell me"
+3. cert-manager **automatically creates a temporary Ingress rule** (this is why it needs to know the ingress class — `nginx`, matching orderlay's actual controller) serving exactly that content at that path
+4. Let's Encrypt's own servers, from the public internet, request that URL
+5. A correct response is the proof — only someone who genuinely controls both the domain's DNS *and* the web server behind it could make that specific path return that specific content
+6. Let's Encrypt issues the real certificate; cert-manager stores it in a Kubernetes `Secret`; the Ingress/Gateway uses that Secret to terminate HTTPS
+7. cert-manager repeats this continuously, well before the 90-day expiry, forever — this is what the already-running `cert-manager`/`cert-manager-cainjector`/`cert-manager-webhook` pods are doing in the background
+
+**This is why a real, DNS-resolvable domain pointing at the cluster is a hard prerequisite for step 4** — not a formality, a live network reachability check performed by Let's Encrypt's own infrastructure.
+
+### 13.5 Why two ACME "tiers" exist, and the naming confusion (expands on §12.9)
+
+Not a quality difference — a **rate-limit** one. Production Let's Encrypt allows 5 certificates per exact domain set per week (plenty for real renewals, easy to exhaust while actively debugging). Staging is the mechanically identical protocol against a deliberately untrusted certificate chain, with far looser limits, specifically so the *plumbing* (DNS, ingress, cert-manager's wiring) can be proven repeatedly without burning a scarce real quota.
+
+**The naming collision, stated precisely**: `-staging`/`-production` in an object's *name* (or which `apps/<env>/` folder it lives in) describes **which Kubernetes environment** it belongs to — an infra/deployment concept. The `server:` URL describes **which ACME tier is active** — a completely independent, CA-specific concept. Agentcis's own real files use the production tier in *both* their K8s environments, proving these two things don't have to move together — a team can (and agentcis does) run a "staging" K8s environment that still requests real, trusted certificates.
+
+### 13.6 The three-object chain, and how it's usually triggered without creating anything by hand
+
+- **`ClusterIssuer`** — created once, the reusable CA profile (this file)
+- **`Certificate`** — a request: "get a cert for domain X using issuer Y, store it in Secret Z" — but you rarely create this directly
+- In practice, an **`Ingress` annotated** with `cert-manager.io/cluster-issuer: lets-encrypt-staging` (exactly the annotation already present in the reusable Helm chart's `nginx-ingress.yml` template, seen much earlier this session) is enough — cert-manager's "ingress-shim" watches for that annotation and creates the `Certificate` automatically
+- Internally, cert-manager also creates `CertificateRequest`/`Order`/`Challenge` objects while working through the ACME steps in §13.4 — never created by hand, but `kubectl get challenge` / `kubectl describe challenge` is exactly where to look if a certificate ever gets stuck in a non-`Ready` state
+
+### 13.7 Recommendation for this specific, first-time setup
+
+Now that the mechanics are clear: for *proving this specific plumbing for the first time* (new domain, new AWS account, never tested before), the textbook-recommended sequence is to temporarily flip the active line to the staging endpoint:
+```yaml
+server: https://acme-staging-v02.api.letsencrypt.org/directory
+```
+get a `Certificate` to actually reach `Ready` (`kubectl describe certificate <name>` → `Status: True, Type: Ready`) — proving DNS → Gateway/ALB → ingress-nginx-class routing → cert-manager's challenge → Let's Encrypt all genuinely work, using effectively unlimited test attempts — **then** flip back to the production endpoint (matching agentcis) for the real thing. This doesn't reverse §12.9's conclusion (the *existing* production-endpoint config was never a bug) — it's a separate, forward-looking suggestion specifically for the act of proving brand-new plumbing.
+
+### 13.8 Current live state of `certificate-issuer.yml`
+
+As of this note update, the file reads:
+```yaml
+apiVersion: cert-manager.io/v1
+kind: ClusterIssuer
+metadata:
+  name: lets-encrypt-staging
+  annotations:
+    argocd.argoproj.io/sync-wave: "-40"
+spec:
+  acme:
+    email: subash.chaudhary@globalyhub.com
+    server: https://acme-v02.api.letsencrypt.org/directory
+    privateKeySecretRef:
+      name: lets-encrypt-key-cluster-issuer
+    solvers:
+    - http01:
+        ingress:
+          class: nginx
+```
+Single active `server:` line, production endpoint, **no commented alternative** — the parity-edit made in §12.9 (which added the commented staging line back to match agentcis byte-for-byte) was subsequently removed again, a simplification rather than a reversion of substance. Noted here as the current, deliberate state rather than something to "fix" back.
+
+### 13.9 Documentation worth reading before continuing
+
+- cert-manager overview: `https://cert-manager.io/docs/`
+- cert-manager ACME issuer configuration (exactly this `ClusterIssuer`): `https://cert-manager.io/docs/configuration/acme/`
+- cert-manager HTTP-01 challenge type in detail: `https://cert-manager.io/docs/configuration/acme/http01/`
+- Let's Encrypt's own "how it works": `https://letsencrypt.org/docs/`
+- Let's Encrypt's staging environment, explained by Let's Encrypt themselves: `https://letsencrypt.org/docs/staging-environment/`
+- Let's Encrypt's current rate limits: `https://letsencrypt.org/docs/rate-limits/`
+- Kubernetes' own Ingress-TLS docs: `https://kubernetes.io/docs/concepts/services-networking/ingress/#tls`
+
+---
+
+## 14. Session Addendum (2026-09-13): LavinMQ Investigated, the Service Files Actually Built and Corrected, a Real Orphaned-Migration Found via DNS, and Directory/Naming Settled
+
+> **Context**: a full day's session, starting from "which LavinMQ does orderlay use" and ending with all 7 real orderlay services properly scaffolded into `gitops-orderlay-deployments`, plus a real production discovery (an orphaned website migration) found through hands-on DNS/WHOIS investigation rather than guesswork.
+
+### 14.1 TL;DR
+
+1. **LavinMQ, fully resolved**: both staging and production self-host their own LavinMQ (not CloudAMQP), same manifest shape, each entirely off-repo (server-only, matching the established "orderlay manifests live off-repo" pattern). Production's broker itself is healthy; only its **web dashboard** was broken, by a Cloudflare "Flexible SSL" redirect loop — the actual AMQP traffic (port 5672, internal-only) was never affected. See §14.2.
+2. **`notification-service`**: a pure event-driven microservice (no HTTP API of its own) that sends all outbound email/SMS/push notifications, triggered by order/restaurant/user/purchase-order events over two RabbitMQ exchanges. Its 3 queues are 3 of the 7 seen live in staging's dashboard. See §14.3.
+3. **The service `Application`+values files the user had drafted were almost entirely broken** — uncustomized copy-pastes of *specific* agentcis services, including one bug (repoURL pointing at agentcis's repo) identical in shape to an earlier session's bug. All 7 rebuilt from scratch, grounded in each service's actual source code (chart choice, public-route-or-not, real ports, real startup commands). See §14.4.
+4. **A real orphaned migration found live**: `website-v2` — a genuine, healthy, 174-day-old production pod with a fully wired Ingress rule for `orderlay.app` — turns out to receive **zero real traffic**, because DNS for `orderlay.app` still points at Vercel. Confirmed via `dig`/`whois`/`curl` header fingerprinting, not assumption. Still an open decision whether to include it in the new GitOps setup. See §14.5.
+5. **Directory structure for the 7 service files went through several honest iterations** before landing on the simplest one that actually fits: a flat `services/` folder on both the `Application`-manifest side and the values side, with room for a `third-party-services/` sibling later, once actually needed. See §14.6.
+6. **The Gateway's own filenames/names were corrected to drop a vestigial "microservice" qualifier** copied from agentcis's two-gateway convention, which never applied to orderlay's single-gateway setup. See §14.7.
+7. **Found, mid-session, that `live-values` is stale** — it was branched before any of today's work, and none of today's file changes have been committed or pushed at all yet. This is the single most urgent item outstanding. See §14.8.
+
+---
+
+### 14.2 LavinMQ — the full, resolved picture
+
+**What's confirmed, staging vs production:**
+
+| | Staging | Production |
+|---|---|---|
+| Broker | Self-hosted `cloudamqp/lavinmq:2.3.0`/`2.4.4`, 1 replica, NFS-backed PVC | Same shape, self-hosted |
+| Manifest location | Off-repo, server-only (`/mnt/manifest/orderlay-self-hosted/lavinmq/`) | Same |
+| Broker healthy? | ✅ Yes — dashboard confirmed 7 real queues, all with active consumers except the DLQ (expected) | ✅ Yes — pod `Running`, 0 restarts, 100 days |
+| Web dashboard reachable? | ✅ Yes — `lavinmq.staging.orderlay.app`, DNS-only (real AWS IP `13.202.4.68`, not Cloudflare) | ❌ **Was** broken — `lavinmq.orderlay.app` → `ERR_TOO_MANY_REDIRECTS` |
+
+**The production dashboard bug, diagnosed precisely:**
+- `dig +short lavinmq.orderlay.app` → `104.21.14.115` / `172.67.202.234` — Cloudflare's own anycast IPs, confirming this record is **proxied**, not DNS-only.
+- `curl -sIL` showed an endless `308` redirect to the *same* URL (`https://lavinmq.orderlay.app` → itself), every hop stamped `server: cloudflare`.
+- Root cause: Cloudflare's SSL/TLS mode for this record is (almost certainly) **"Flexible"** — Cloudflare terminates the client's HTTPS, then connects to the *origin* over plain HTTP. The Ingress (`lavin-mq-production-ingress`) has an active `tls:` block, so ingress-nginx's default behavior force-redirects that incoming HTTP request to HTTPS. The browser, already "on HTTPS" as far as it knows, requests the same HTTPS URL again → Cloudflare downgrades to HTTP again → infinite loop.
+- **Fix (not yet applied)**: change Cloudflare's SSL/TLS mode for this record from Flexible to **Full (strict)** — safe here specifically because the origin already presents a real Let's Encrypt cert (`cert-manager.io/cluster-issuer: lets-encrypt`), which Full (strict) can actually validate.
+- **Critical clarification**: this bug **only** affects the human-facing web dashboard (port `15672`, routed by the Ingress). The actual AMQP protocol (port `5672`) is reached internally via the `lavinmq-svc` `ClusterIP` Service, pod-to-pod, with zero Cloudflare/Ingress involvement — `backend_v2`/`notification-service`/etc. were never affected by this bug, proven independently by the `kubectl get pod` healthy/long-uptime evidence.
+
+**Real manifest content** (`/mnt/manifest/orderlay-self-hosted/lavinmq/lavinmq.yml`, production):
+```yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: lavinmq-orderlay
+  namespace: orderlay-self-hosted
+spec:
+  replicas: 1
+  template:
+    spec:
+      containers:
+      - name: lavinmq
+        image: cloudamqp/lavinmq:2.3.0
+        ports: [{containerPort: 5672, name: amqp}, {containerPort: 15672, name: http}]
+        volumeMounts:
+        - {name: lavinmq-data, mountPath: /var/lib/lavinmq}
+      volumes:
+      - name: lavinmq-data
+        persistentVolumeClaim: {claimName: nfs-lavinmq-data-pvc}
+---
+apiVersion: v1
+kind: Service
+metadata: {name: lavinmq-svc, namespace: orderlay-self-hosted}
+spec:
+  selector: {app: lavinmq}
+  ports: [{name: amqp, port: 5672}, {name: http, port: 15672}]
+  type: ClusterIP
+```
+Backed by an NFS `PersistentVolume` (`nfs.orderlay.internal:/orderlay-pv-production/logs/lavinmq`, 10Gi, `ReadWriteMany`) — same NFS-backed pattern already documented for other orderlay storage.
+
+**Operational risk worth flagging, not yet acted on**: `replicas: 1`, no redundancy of any kind. If this one pod dies, every service that publishes/consumes (`backend_v2`, `notification-service`, `brevo-integration-service`, `nepbooks-integration-service`, `order-service`) loses queueing simultaneously, with no failover — the same class of risk as the RDS `Multi-AZ: No` finding in the agentcis infra notes.
+
+---
+
+### 14.3 What `notification-service` actually is
+
+Confirmed by reading `notification-service/src/main.ts` and `package.json` directly. **A pure event-driven consumer with no HTTP server of its own** — its entire job is turning business events (from `backend_v2`, mainly) into real outbound email (`nodemailer`), SMS (custom `sendSms`), and push notifications (`firebase-admin`).
+
+Two separate RabbitMQ connections, both to the same broker, different exchanges:
+```ts
+const eventBus  = new RabbitMQEventBus({ connection: { url: RABBITMQ_URL, exchange: "order.events" } });
+const brevoBus  = new RabbitMQEventBus({ connection: { url: RABBITMQ_URL, exchange: "brevo.events" } });
+```
+Three subscribed queues — **confirmed live**, these are 3 of the 7 queues seen in staging's LavinMQ dashboard:
+- `order-event-notification-queue` — 17 order-lifecycle event types (placed, confirmed, ready, cancelled, payment events, etc.), delegated to `OrderNotificationService`
+- `restaurant-event-notification-queue` — restaurant/purchase-order events; the Purchase-Order-Created handler is fully implemented inline in `main.ts`: generates a PDF via Puppeteer, uploads it to S3, emails it to the supplier as an attachment, and optionally SMS's a public link to it
+- `user-event-notification-queue` — registration/OTP/forgot-password/contact-change, delegated to `UserNotificationService`
+
+**Naming quirk worth remembering**: the `brevoBus` variable name doesn't mean "the Brevo integration" — that's the separate `brevo-integration-service`. It's just an internal variable name for the second exchange, which happens to carry restaurant/user events, not Brevo-specific ones.
+
+---
+
+### 14.4 The service `Application`+values files — found broken, rebuilt correctly
+
+**What was found** (user-drafted, in `apps/staging/application/services/`, before correction): every file was an **uncustomized copy of one specific agentcis service** — `backend-v2.yml` was actually agentcis's real `email-summary-api` Application verbatim (wrong repo, wrong name, wrong namespace); `brevo-integration-service.yml`, `nepbooks-integration-service.yml`, `notification-service.yml`, and a bogus `website-v2.yml` were **four identical copies** of agentcis's `agentcis-website` Application; `web-v2.yml` was agentcis's `sms-campaign-frontend` Application. The Gateway file already in progress (`aws-gw-orderlay-microservice.yml`, as it was named then) had the same class of bug — its values-file reference still pointed at agentcis's own per-service file.
+
+**Classification actually used, grounded in each service's real code** (chart choice from whether it serves HTML or JSON/gRPC; public route from whether the public internet needs to reach it directly):
+
+| Service | Confirmed from | Chart | Public route | Real port |
+|---|---|---|---|---|
+| `backend_v2` | Express + WS API | `backend` | ✅ | 8000 |
+| `web-v2` | Next.js (`package.json`) | `frontend` | ✅ | 3000 |
+| `back-office` | Next.js (`package.json`) | `frontend` | ✅ | 3000 |
+| `website-v2` | Next.js (`package.json`) — separate real app, not a typo | `frontend` | (pending decision, §14.9) | 3000 |
+| `notification-service` | No HTTP server in `main.ts` at all | `backend`, `httproute: false` | ❌ | — |
+| `brevo-integration-service` | No HTTP server in `main.ts` at all | `backend`, `httproute: false` | ❌ | — |
+| `nepbooks-integration-service` | Fastify + Connect-RPC, JWT-authenticated, called only by `backend_v2` | `backend`, `httproute: false`, `service.enabled: true` (ClusterIP) | ❌ (internal only) | 8091 |
+| `order-service` | gRPC on hardcoded `:8089` (`server.listen({port: 8089})`) | — | — | not currently deployed as its own workload, see §14.9 |
+
+**Real correctness fix along the way**: `backend_v2`'s own `package.json` says `"start": "pm2 start dist/src/server.js"` — used verbatim in a container, plain `pm2 start` daemonizes and exits immediately, crash-looping the pod. Changed to `pm2-runtime start dist/src/server.js` (PM2's container-aware foreground variant).
+
+**Corrections made mid-stream, from the user's own direct production checks (`kubectl get pod -A`)**:
+- Real production namespaces are just `orderlay-backend` and `orderlay-frontend` (not one namespace per service, as originally scaffolded) — user fixed 5 files themselves, `nepbooks-integration-service.yml` fixed to match.
+- **No separate `order-service` deployment exists in production at all** — user deleted the file; corresponding orphaned values file cleaned up. Still open whether it's bundled inside `backend_v2`'s own pod or genuinely not deployed yet (§14.9).
+- `website-v2.yml` was wrongly deleted (reasoned, incorrectly, that it wasn't a real service) — see §14.5 for the full story of why it's actually real.
+
+---
+
+### 14.5 `website-v2` — a real, live, orphaned migration, found by reverse-engineering DNS
+
+This is the most valuable investigative thread of the day, worth keeping in full because the *method* is reusable well beyond this one case.
+
+**The trigger**: production's real pod list (`kubectl get pod -A`, user-run) showed `website-v2-deployment-76bbc94dc5-v56vf`, 174 days old, `Running`, in `orderlay-frontend` — a service not mentioned anywhere in `orderlay/CLAUDE.md`. Confirmed real by finding an actual `website-v2/` directory in the monorepo (`package.json` name: `website-v2`, genuine Next.js app) — not a typo or copy-paste artifact.
+
+**The real production Ingress** (`/mnt/manifest/orderlay-frontend/no-change/https-orderlay-frontend.yml`, found by the user), three services in one file:
+```yaml
+# web-v2 — TLS ACTIVE
+metadata: {name: web-v2-production-ingress}
+spec:
+  tls: [{hosts: [web.orderlay.app], secretName: web-v2-production-tls-secret}]
+  rules: [{host: web.orderlay.app, ...backend: {service: {name: web-v2-svc, port: 3000}}}]
+---
+# website-v2 — TLS commented out
+metadata: {name: website-v2-production-ingress}
+spec:
+  #tls: [...]   ← commented out
+  rules: [{host: orderlay.app, ...backend: {service: {name: website-v2-svc, port: 3000}}}]
+---
+# back-office — TLS also commented out
+metadata: {name: back-office-production-ingress}
+spec:
+  #tls: [...]   ← commented out
+  rules: [{host: back-office.orderlay.app, ...backend: {service: {name: back-office-svc, port: 3000}}}]
+```
+
+**The reverse-study method, actually run, step by step** (this is the reusable part):
+```bash
+dig +short orderlay.app                    # → 216.150.16.65 / .193 (varies — anycast)
+whois 216.150.16.65 | grep -i orgname      # → "Vercel, Inc"          ← authoritative proof
+curl -sI https://orderlay.app | grep -i server   # → "server: Vercel"  ← the server naming itself
+```
+Same method applied to the other two hostnames, cleanly separating three different outcomes:
+
+| Hostname | DNS resolves to | Proof it's real/not | Verdict |
+|---|---|---|---|
+| `web.orderlay.app` | `3.6.24.2` — real AWS Mumbai (`whois` → Amazon Data Services India) | `curl` → `308` HTTP→HTTPS redirect, `server: nginx` | ✅ **Genuinely live**, DNS-only, real TLS |
+| `back-office.orderlay.app` | `104.21.14.115`/`172.67.202.234` — Cloudflare | `curl` → `200 OK` | ✅ **Genuinely live**, Cloudflare-proxied, but no origin TLS (matches the commented-out `tls:` block — works only because there's no forced redirect to collide with, unlike LavinMQ's bug) |
+| `orderlay.app` (bare apex → `website-v2`) | Same Vercel IPs as above | `curl` → real marketing site content, but from Vercel | ❌ **Orphaned** — the k8s pod behind this Ingress rule receives zero real traffic |
+
+**Why "orphaned, DNS never cut over" is the right conclusion, not a guess** — every piece of evidence points the same direction: a real, healthy pod (174d uptime) + a fully-formed Ingress rule targeting the *exact* production domain + a `cert-manager.io/cluster-issuer` annotation already present (signaling real intent to eventually serve real HTTPS) — **but** the `tls:` block itself was never finished/activated, and DNS was never repointed. Reads as a migration that was fully built on the Kubernetes side and stopped one step short of going live, not something deliberately staged to stay on Vercel forever.
+
+**Key conceptual point taught here, worth remembering generally**: an `Ingress` object is pure *intent* — "if a request with this Host header reaches this cluster, send it here." It has no power to make DNS send traffic toward it. DNS and Ingress are two completely independent systems; a perfectly-configured Ingress with zero real traffic reaching it is a legitimate, common state, not a contradiction.
+
+**Still open**: is `website-v2` a stalled migration worth finishing (uncomment the `tls:` block, properly issue a cert, flip DNS), or effectively abandoned? Not resolved this session — needs input from whoever owns the marketing site.
+
+---
+
+### 14.6 Directory structure for the service files — the actual iteration history
+
+Worth keeping the full back-and-forth, since each step was a real, reasoned correction, not indecision for its own sake:
+
+1. Started by mirroring agentcis's own `web-server/`/`microservice/` split — **wrong for orderlay**, because that split reflects agentcis's specific history (an old monolith + newer split-out services), and orderlay never had a monolith at all.
+2. Considered **one folder per service** — rejected: at only 7 services, unnecessary granularity, no real navigability problem it would solve.
+3. Considered **grouped by network exposure** (`public/`/`internal/`) — genuinely meaningful (maps directly onto the real `httproute.enabled` decision), implemented fully (both `Application` manifests and values files reorganized, all paths fixed) — see the `public: [backend-v2, web-v2, back-office, website-v2]` / `internal: [notification-service, brevo-integration-service, nepbooks-integration-service]` split.
+4. **Landed on flat `services/`** instead — the user's own call: rather than encode public/internal as folders, just put everything in one flat `services/` directory (matching the name already used on the `Application`-manifest side), leaving the public/internal distinction to live where it already meaningfully lives — the `httproute.enabled` flag inside each file — with room for a **sibling** `third-party-services/` folder later (matching agentcis's own real convention, `gitops-values/staging/apps/third-party-services/lavinmq-etcd-values.yaml`), created only once actually needed, not preemptively.
+
+**Final, settled structure:**
+```
+apps/staging/application/services/       ← Application manifests, flat
+gitops-values/staging/apps/services/     ← values files, flat, same filenames
+  backend-v2.yml, web-v2.yml, back-office.yml, website-v2.yml,
+  notification-service.yml, brevo-integration-service.yml, nepbooks-integration-service.yml
+
+(future, only when actually needed)
+gitops-values/staging/apps/third-party-services/
+```
+
+**One clarifying side-note that came up along the way**: `backend_v2` sits under "public" (in the sense of `httproute.enabled: true`) despite *also* calling `nepbooks-integration-service`/an order-service process internally. That's not a contradiction — "public vs internal" describes **inbound** reachability (can the outside world reach this service directly), completely independent of what the service itself calls **outbound** as a client. `backend_v2` is public because real browsers/the mobile app reach it directly; it separately makes internal calls to other services, which has no bearing on its own classification.
+
+---
+
+### 14.7 Gateway naming — corrected to drop a vestigial qualifier
+
+Agentcis names its two real gateways `agentcisapp-stage` and `microservice-stage` — and that split is deliberate: two gateways in one account need names that distinguish them *from each other* ("which app" vs "which kind of traffic, i.e. not the main app").
+
+**Orderlay only has one gateway, ever** — there's no sibling "parent" gateway to distinguish it from, so carrying "microservice" forward serves no purpose and becomes permanent noise in every AWS resource this creates. Corrected across every layer:
+
+| | Before | After |
+|---|---|---|
+| Application filename | `aws-gw-orderlay-microservice.yml` | `aws-gw-orderlay.yml` |
+| Application `metadata.name` | `aws-api-gateway-orderlay-microservice` | `aws-api-gateway-orderlay` |
+| Values filename | `alb-aws-gw-orderlay-microservice.yml` | `alb-aws-gw-orderlay.yml` |
+| Gateway resource name (`k8s_api_gateway.name`/`aws_alb_config.name`) | `orderlay-stage` | unchanged — already correct |
+
+The `sync-wave` annotation's comment (`# Installing before microservices start`) was deliberately left alone — that's describing *timing relative to other Applications*, a real, different use of the word, not naming the gateway itself.
+
+---
+
+### 14.8 Current, precise punch list (verified live at end of this session)
+
+```bash
+git branch -a
+* alija-init-gitops-structure
+  live-values      ← STALE — branched before today's work, nothing from today committed or pushed
+```
+**Most urgent item, ahead of everything else below**: commit and push all of today's changes on `alija-init-gitops-structure`, then bring `live-values` up to date and push it too. Until this happens, none of today's work is backed up anywhere.
+
+**Remaining `TODO` placeholders, confirmed via `grep`:**
+- `gitops-values/staging/others/alb-aws-gw-orderlay.yml` → `defaultCertificate: "TODO-ACM-CERT-ARN-PENDING-ACCESS"` — blocked on the ACM/Cloudflare access request to the user's senior (§13.2/§10 of the companion install note)
+- All 7 service values files → `image.repository`/`image.tag` placeholders (`TODO-ECR-REGISTRY/orderlay-<service>`, `TODO-IMAGE-TAG`) — fastest real fix: `kubectl get pods -n orderlay-backend -o jsonpath='{range .items[*]}{.metadata.name}{"  "}{.spec.containers[0].image}{"\n"}{end}'` (and the same for `orderlay-frontend`) against production, to read the real ECR paths directly instead of guessing
+- All 7 service values files → `pvcName: "nfs-orderlay-backend-config-pvc"` — an invented placeholder, needs confirming against the real PVC name already in use server-side
+
+**The full remaining sequence to actually go live, in order:**
+1. Commit + push everything (above)
+2. Fill in the ACM cert ARN once access is granted
+3. Fill in real image repos/tags (from the `kubectl` check above)
+4. Confirm the real NFS PVC name
+5. `kubectl apply -f staging-root.yml` on the master — **still hasn't happened** — this is the actual moment ArgoCD starts watching any of `gitops-orderlay-deployments`' app-workload content
+6. Verify: `kubectl get application -n argocd`, watch Applications sync, confirm pods come up in `orderlay-backend`/`orderlay-frontend`
+
+### 14.9 Two decisions still open, unresolved this session
+
+- **`order-service`**: no separate deployment exists in production today. Unconfirmed whether it runs as a second process inside `backend_v2`'s own pod (plausible, since `backend_v2`'s own docs describe it proxying gRPC to `0.0.0.0:8089`) or is simply not deployed yet. Worth checking `backend_v2`'s actual Dockerfile/entrypoint to settle this before deciding whether `order-service` needs its own `Application`+values pair at all.
+- **`website-v2`**: real, running, but receiving zero real traffic (§14.5). Whether to include it in this staging GitOps buildout depends on whether anyone actually intends to finish that migration — not something to decide unilaterally.
+
+---
+
+*Companion reading (updated): `note/ORDERLAY_TERRAFORM_BOOTSTRAP_IAM_AND_ASG_LIFECYCLE_NOTES.md` (server/IAM side — §11.5 of this addendum directly corrects an over-cautious reading of that note's `oidc_create` discussion), `note/ORDERLAY_ARGOCD_INSTALL_AND_APP_OF_APPS_NOTES.md` (the original ArgoCD-install run — its own §10 now carries a self-contained summary of the credential incident), `note/ORDERLAY_ARGOCD_APP_OF_APPS_CASCADE_DIAGRAM.html` (visual version of §4), `note/QUEUE_LAVINMQ_LEARNING_PATH_FOR_BEGINNERS_NOTES.md` (general queue/consumer/LavinMQ concepts, referenced throughout §14.2-14.3), `note/AGENTCIS_STAGING_VS_PRODUCTION_INFRA_NOTES.md` (the real agentcis Ingress/Gateway/subdomain conventions §14.4-14.7 were checked against).*
