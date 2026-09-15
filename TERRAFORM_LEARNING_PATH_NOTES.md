@@ -1,6 +1,6 @@
-# Learning Terraform From Zero — A Stepwise Path, Mapped to This Repo
+# Learning Terraform From begining — A Stepwise Path, Mapped to This Repo
 
-> **Who this is for:** you, right now, a junior DevOps engineer who inherited a real Terraform codebase (`GH-infra-and-k8s-charts-central/terraform-iaac/`) written by someone else, trying to build a genuine mental model instead of just copy-pasting changes.
+> **Who this is for:** a junior DevOps engineer who inherited a real Terraform codebase (`GH-infra-and-k8s-charts-central/terraform-iaac/`) written by someone else, trying to build a genuine mental model instead of just copy-pasting changes.
 > **Why this note exists:** official docs teach *the language*, in the abstract. They will never show you *your* repo. This note is the bridge — every concept links to the real HashiCorp docs page, and then points at the exact file and lines where you can see it being used for real, in code you already have.
 > **All doc links below were verified live on 2026-09-02** — if a link ever 404s, search `developer.hashicorp.com` or `registry.terraform.io` for the page title given.
 
