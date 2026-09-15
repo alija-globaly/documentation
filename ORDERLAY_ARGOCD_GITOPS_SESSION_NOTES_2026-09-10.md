@@ -1291,4 +1291,175 @@ git branch -a
 
 ---
 
-*Companion reading (updated): `note/ORDERLAY_TERRAFORM_BOOTSTRAP_IAM_AND_ASG_LIFECYCLE_NOTES.md` (server/IAM side — §11.5 of this addendum directly corrects an over-cautious reading of that note's `oidc_create` discussion), `note/ORDERLAY_ARGOCD_INSTALL_AND_APP_OF_APPS_NOTES.md` (the original ArgoCD-install run — its own §10 now carries a self-contained summary of the credential incident), `note/ORDERLAY_ARGOCD_APP_OF_APPS_CASCADE_DIAGRAM.html` (visual version of §4), `note/QUEUE_LAVINMQ_LEARNING_PATH_FOR_BEGINNERS_NOTES.md` (general queue/consumer/LavinMQ concepts, referenced throughout §14.2-14.3), `note/AGENTCIS_STAGING_VS_PRODUCTION_INFRA_NOTES.md` (the real agentcis Ingress/Gateway/subdomain conventions §14.4-14.7 were checked against).*
+## 15. Session Addendum (2026-09-14 to 2026-09-15): From TODO Placeholders to a Fully Working, Live End-to-End Stack
+
+### 15.1 TL;DR
+
+Two days that took every remaining `TODO` from §14.8's punch list and turned it into a genuinely live, end-to-end system: a real ACM cert + Cloudflare DNS, a Gateway reporting `PROGRAMMED: True` with a real ALB, an NFS server actually exporting real paths, `backend_v2` and `web-v2` both running with real image tags, a self-hosted LavinMQ instance, a second, real Kubernetes worker node properly joined, and — as final, direct proof — a real user logging in through the browser, hitting the new backend, over the new Gateway, with real restaurant data loading. Everything below is in the order it actually happened, with real command output, not paraphrased.
+
+---
+
+### 15.2 ACM certificate + Cloudflare DNS — unblocking §14.8's `TODO-ACM-CERT-ARN-PENDING-ACCESS`
+
+Real `orderlay.app` Cloudflare access still hadn't been granted, so a temporary, scoped test domain was used instead: `orderlay-test.agentcis.com`, borrowing agentcis's own Cloudflare zone (with permission) purely for infra testing.
+
+1. Requested a public ACM cert for the exact hostname `orderlay-test.agentcis.com` (deliberately **not** a wildcard — least-privilege, since the plan at the time was one hostname).
+2. Added the DNS validation CNAME ACM generated to the `agentcis.com` zone; cert reached `Issued`.
+3. Filled the real ARN into `gitops-values/staging/others/alb-aws-gw-orderlay.yml`'s `defaultCertificate` (replacing the `TODO`).
+4. Added the actual **routing** CNAME (a separate record from the validation one) pointing `orderlay-test.agentcis.com` at the ALB's real hostname, DNS-only (grey cloud).
+5. Later, once multiple services needed their own test subdomains (`backendv2.*`, `web.*`, `lavinmq.*`), requested a **second** cert — this time `*.orderlay-test.agentcis.com` plus the bare domain as a second name on the same request. Interesting, real finding: ACM showed this new cert `Issued` almost instantly, before any new validation record was added — because a wildcard and its base domain use the **identical** DNS validation CNAME, and the original cert's validation record was still sitting in the zone from step 2, satisfying the new request automatically.
+6. Wired the wildcard cert in as an **additional** SNI certificate (`additionalCertificates.enabled: true`, `arns: [...]`) rather than replacing `defaultCertificate` — so the original bare-hostname test and every new wildcard subdomain both get valid TLS from the same listener.
+7. Added one more wildcard **routing** CNAME (`*.orderlay-test.agentcis.com` → the ALB hostname) so any new service subdomain "just works" without a new Cloudflare record each time.
+
+### 15.3 The Gateway reaching `PROGRAMMED: True` with a real, live ALB
+
+```
+Status:
+  Addresses:
+    Type:   Hostname
+    Value:  k8s-gateways-orderlay-0f3ff71fbe-1955096241.ap-south-1.elb.amazonaws.com
+  Conditions:
+    Reason: Programmed
+    Status: True
+    Message: arn:aws:elasticloadbalancing:ap-south-1:381491939487:loadbalancer/app/k8s-gateways-orderlay-0f3ff71fbe/5b7d30e7924a71e4
+```
+Confirmed independently in the AWS Console: a real, `Active` ALB, correct VPC (`vpc-0956141e90f4f7a4e`), one HTTP:80 listener (redirect + default fixed-response rule) at the time, zero target groups (expected — no service Applications existed yet). This was the first real, physical proof the whole AWS Load Balancer Controller + Gateway API + CRD chain from earlier addenda genuinely worked, not just synced cleanly.
+
+---
+
+### 15.4 The `nfs.orderlay-staging.internal` NXDOMAIN investigation (DNS Firewall)
+
+A long, methodical "reverse study" investigation (same style as §14.5's orphaned-`website-v2` DNS work), ruling out one cause at a time with live evidence rather than guessing:
+
+| Ruled out | How |
+|---|---|
+| Record doesn't exist | `aws route53 list-resource-record-sets` — record genuinely there, correct IP |
+| Wrong VPC association | `aws route53 get-hosted-zone` — exact VPC ID/region match, confirmed via IMDS |
+| VPC DNS support disabled | Console: `DNS resolution: Enabled` |
+| Wrong DHCP option set | Console: `Domain name servers: AmazonProvidedDNS` |
+| Negative DNS caching | Retested after 5+ min wait, and with a brand-new never-queried name (`mynfs...`) — same failure |
+| Stale Resolver internal state | Forced a full disassociate → reassociate cycle via a temporary second VPC (since AWS won't let you disassociate a zone's *last* VPC) — confirmed `INSYNC`, no change |
+| Local interception (Cilium/eBPF) | `dig @172.34.0.2 amazon.com` returned a real, correct answer — proving the resolver itself works fine for everything *except* this one private zone |
+
+**Conclusion, not yet independently confirmed**: points at a Route 53 Resolver **DNS Firewall** rule blocking `orderlay-staging.internal` specifically — checking this directly was blocked by an `AccessDeniedException` on `route53resolver:ListFirewallRuleGroupAssociations`, handed off to the senior. **Never confirmed fixed as of this writing** — worked around everywhere it blocked something real (see below), rather than waited on.
+
+Same bug resurfaced blocking the new worker node's join health-check later (§15.7) — full detail of that specific angle lives in the companion note listed at the end of this section.
+
+### 15.5 NFS server — from "untouched box" to real, working exports
+
+Discovered the box named/tagged "nfs" (`172.34.25.217`) was genuinely blank — nothing configured yet, despite the name.
+
+```bash
+sudo apt install -y nfs-kernel-server
+sudo mkdir -p /nfs-staging/pods-storage /nfs-staging/env-storage   # env-storage later abandoned, see below
+```
+
+`/etc/exports` (added):
+```
+/nfs-staging/pods-config 172.34.0.0/16(rw,sync,no_subtree_check)
+/nfs-staging/pods-storage 172.34.0.0/16(rw,sync,no_subtree_check)
+```
+`sudo exportfs -ra` to activate. Real finding mid-setup: an existing `pods-config` export (dated Sep 10, before this session) was discovered already sitting there — decided to **reuse** it for env/config files instead of the freshly-invented `env-storage` path, avoiding a second, redundant export.
+
+Because of §15.4, `nfs.orderlay-staging.internal` couldn't be used as the mount hostname — every PV/CronJob was pointed at the raw IP (`172.34.25.217`) instead, each marked with a `TODO` comment to switch back once DNS Firewall is actually fixed.
+
+Built `1-nfs-directory-create.yml`, a CronJob mounting both exports and auto-creating each service's subdirectory (`mkdir -p /mnt/pods-storage/orderlay-backend/backend-v2 /mnt/pods-storage/lavinmq /mnt/pods-storage/orderlay-frontend/web-v2 /mnt/pods-config/orderlay-backend ...`) — real lesson learned the hard way: **the export path itself and any subdirectory under it must already exist server-side before kubelet can mount it at all** — a missing directory produces `mount.nfs: ... No such file or directory`, and the CronJob can't fix its own mount target (chicken-and-egg).
+
+Renamed everything from initially-confusing generic names (`nfs-volume`, `/mnt/nfs`) to self-describing ones (`pods-storage-volume`/`/mnt/pods-storage`, `pods-config-volume`/`/mnt/pods-config`) matching the real NFS path each one represents.
+
+### 15.6 PV/PVC pattern for `backend_v2` (logs + env) — and two real bugs found building it
+
+Two separate PV/PVC pairs, reusing the generic `self-managed/persistent-volume` chart:
+- `pv-orderlay-backend-storage` / `pvc-orderlay-backend-storage` → `/nfs-staging/pods-storage/orderlay-backend`, mounted at `/var/log/nginx/`
+- `pv-orderlay-backend-env` / `pvc-orderlay-backend-env` → `/nfs-staging/pods-config/orderlay-backend`, mounted via `custompvc` at the `.env` path
+
+**Bug found #1 — wrong mount path for the `.env` file.** First attempt mounted it at `/app/.env`, copied blindly from agentcis's own convention. Traced `backend_v2/src/app.ts:27`'s `dotenv.config()` (no explicit path — resolves relative to `process.cwd()`) against the Deployment's actual `workingDir` (`/orderlay/staging/backend_v2/`, matching `Dockerfile.staging`'s real `WORKDIR`) — confirmed the app was looking for `.env` in a completely different place than where it was mounted. Fixed to `/orderlay/staging/backend_v2/.env`.
+
+**Bug found #2 — `subPath` auto-creates a directory, never a file.** Once the mount path was fixed, kubelet still didn't see a real file — because `subPath: backend_v2.env` had never existed on the NFS server, and Kubernetes' own behavior for a missing `subPath` target is to silently `mkdir` it, never to create an empty file. Fixed by `rmdir`-ing the wrongly-created directory on the NFS server and placing a real file there instead, then deleting the pod to force a fresh mount.
+
+### 15.7 A second, real worker node — summary (full transcript in the companion note)
+
+Discovered via an empty `describe-target-health` result (`{"TargetHealthDescriptions": []}`) that this cluster had **no node at all** carrying the `type=default-server-worker` label every `targetGroupConfiguration` in this project selects on — the master was the cluster's only node, unlabeled. Deliberately chosen **not** to just label the master; instead joined the already-Terraform-provisioned but never-joined EC2 instance `i-03591e1ad07746b49` (`[orderlay-staging]-default-worker-instance`) as a real, dedicated worker, via the existing shared `k8s-cluster-join-worker.sh` script (Canonical Kubernetes `k8s` snap, not kubeadm).
+
+Its first automatic join attempt (5 days earlier, at first boot) had silently failed and never retried — root-caused to the exact same DNS Firewall issue from §15.4, now also blocking the join's master health-check. Worked around with a local `/etc/hosts` override, then re-ran the join script successfully:
+```
+Node successfully joined the cluster!
+...
+node/default-server-worker-172-34-30-247 labeled
+[2026-09-15 13:26:51] | default-server-worker-172-34-30-247 Node label Finish to type => default-server-worker
+[2026-09-15 13:26:51] | All tasks completed successfully!
+```
+Confirmed from the master itself: `STATUS: Ready`, `ROLES: worker`, `TYPE: default-server-worker`. AWS Load Balancer Controller picked it up automatically on its next reconcile — no values-file changes needed.
+
+*Full step-by-step, including the exact `dig`/`aws elbv2`/log output at each stage: `note/ORDERLAY_WORKER_NODE_AND_LAVINMQ_SETUP_SESSION_NOTES_2026-09-15.md`, §1-8.*
+
+### 15.8 Self-hosted LavinMQ — summary (full transcript in the companion note)
+
+Checked production's real running pod first (`lavinmq-orderlay-6df4f8cd55-6l57r` — a single plain Deployment, no operator, no etcd) before considering the fancier `lavinmq-operator`/`lavinmq-instance` chart (which needs etcd + a dedicated NFS `StorageClass`, neither present in this project, and sits `disabled` even in agentcis's own repo). Deliberately mirrored production's simple setup instead, reusing the generic `self-managed/backend` chart rather than writing a new one — required swapping which port is "primary" (`15672` instead of `5672`) since the chart's `HTTPRoute` template only ever targets the primary `svcport`.
+
+The user/permission debugging afterward was the longest single thread of the whole session:
+1. `backend_v2`: `ENOTFOUND lavinmq-svc...` → LavinMQ didn't exist yet → deployed.
+2. `User "orderlay-admin" not found` → created the user (but typed a literal `xxxx` placeholder as its password, not the real one).
+3. `403 ACCESS_REFUSED` → a plausible, technically-correct-looking **false lead**: fixed the `.env`'s bare trailing-slash vhost (`:5672/`) to the properly-encoded default vhost (`:5672/%2F`) — did **not** fix it.
+4. Real root cause found by reconciling `backend_v2`'s generic client-side `ACCESS_REFUSED` against LavinMQ's own specific server-side log at the identical timestamp (`"orderlay-admin" not found`) — AMQP brokers deliberately return a vague error to the client for *any* auth failure. Re-ran `add_user` with the real, matching password → `backend_v2` came up `1/1 Running` immediately, and the stale old ReplicaSet auto-cleaned itself up.
+5. Separately, the LavinMQ **dashboard** login also failed even with the correct password — different check entirely (management UI requires the `administrator` user tag, unrelated to AMQP auth) — fixed with `lavinmqctl set_user_tags orderlay-admin administrator`.
+
+*Full real log output for every step above: `note/ORDERLAY_WORKER_NODE_AND_LAVINMQ_SETUP_SESSION_NOTES_2026-09-15.md`, §9-17.*
+
+### 15.9 `backend_v2` — confirmed genuinely working end-to-end
+
+```bash
+$ curl https://backendv2.orderlay-test.agentcis.com/
+Cannot GET /
+```
+`Cannot GET /` is Express's own normal response for a REST API with no root route — proof DNS, TLS (the wildcard cert), the ALB, the `HTTPRoute`, the `Service`, and the pod itself all worked together correctly, for the first time on this cluster.
+
+Two more real image-tag bugs found and fixed along the way, both the same class of mistake — pasting a full `repo:tag` string into the wrong field, producing an invalid double-colon image reference:
+- `repository: "...staging-backend_v2:backend_v2-09-14-275a099"` with `tag:` *also* set separately → fixed by stripping the tag back out of `repository`.
+- (Same mistake recurred on `web-v2.yml` two days later — `repository: "...staging-web-v2:"` with a stray trailing colon — caught the same way before it was ever pushed.)
+
+### 15.10 `web-v2` — pipeline built, PV pattern extended to the frontend chart
+
+Built `nginx-k8s-web-v2.yml`, a build-and-push-only pipeline (no `GITOPS_WRITE_TOKEN` yet, same limitation as `backend_v2`'s own pipeline) — reviewed against the *already-working* `k8s-web-v2.yml` and confirmed byte-identical build logic, just the SSH deploy step removed.
+
+Extended the PV pattern to a **shared** `orderlay-frontend-storage` PV/PVC (one PV across `web-v2`/`back-office`/`website-v2`, each with its own `subPath`) — same design as the backend's `pods-storage` PV, reusing the export rather than creating a new one.
+
+### 15.11 The frontend→backend connection saga — two distinct, real bugs
+
+With both `web-v2` and `backend_v2` genuinely running, login still failed. Root-caused as **two separate, unrelated problems**, found in order:
+
+**Bug A — wrong backend entirely.** The Network tab showed the login request going to `https://api.staging.orderlay.app/api/user/login` — the *old* cluster's real, live API, not the new test one. Traced through `web-v2/config/api.ts`: `NEXT_PUBLIC_ENVIRONMENT=staging` (set by the CI pipeline) hits a **hardcoded** branch (`if (env === 'staging') return 'https://api.staging.orderlay.app/api'`) that ignores `NEXT_PUBLIC_API_BASE_URL` entirely — that override only applies inside the `development` branch. Fix applied **only inside the new test pipeline** (`nginx-k8s-web-v2.yml`), deliberately not touching the shared `vars.NEXT_PUBLIC_ENVIRONMENT` GitHub variable also read by the real, live `k8s-web-v2.yml` pipeline:
+```bash
+echo "NEXT_PUBLIC_ENVIRONMENT=development" > web-v2/build.env
+echo "NEXT_PUBLIC_API_BASE_URL=https://backendv2.orderlay-test.agentcis.com/api" >> web-v2/build.env
+```
+
+**Bug B — CORS rejecting the new origin.** Even pointed at the right backend, the browser showed empty response headers ("provisional headers only") — traced to `backend_v2/src/utils/corsSetter.ts`: `ENVIRONMENT=Development` (confirmed by reading the real `.env` on the NFS server) selects an origin allowlist that never included any `*.orderlay-test.agentcis.com` hostname. Added both `https://web.orderlay-test.agentcis.com` and `https://backendv2.orderlay-test.agentcis.com` to that list, commented as temporary/removable once real hostnames are in use.
+
+**A real false alarm along the way, worth recording the method for**: after pushing the CORS fix, login still failed identically. Rather than assume the fix was wrong, checked whether it had actually been deployed at all:
+```bash
+kubectl get pod -n orderlay-backend -o jsonpath='{.items[0].spec.containers[0].image}'
+# ...staging-backend_v2:backend_v2-09-14-275a099   ← yesterday's tag, before today's fix
+```
+Confirmed independently with a direct CORS preflight probe, bypassing the browser entirely:
+```bash
+curl -v -X OPTIONS https://backendv2.orderlay-test.agentcis.com/api/user/login \
+  -H "Origin: https://web.orderlay-test.agentcis.com" \
+  -H "Access-Control-Request-Method: POST"
+# response has NO access-control-allow-origin header at all
+```
+Both pieces of evidence agreed: the code fix was correct, but had simply never been rebuilt/redeployed. Rebuilt, updated the image tag, redeployed — real login succeeded immediately afterward: a real user (`Amod Pradhan`), 52 real restaurants loaded, `socket.io` websocket connected, every API call returning clean `200`/`204`/`101`.
+
+---
+
+### 15.12 Punch list going into the next session
+
+- DNS Firewall root cause (§15.4) — **still not independently confirmed fixed**; every NFS/worker-join path still uses the raw-IP workaround, marked `TODO` throughout.
+- `GITOPS_WRITE_TOKEN` — still not set up; both `backend_v2` and `web-v2` pipelines remain build-and-push-only, with image tags copied into values files by hand.
+- `nepbooks-integration-service` nginx rollout — Dockerfile/nginx.conf already built (earlier session), but adding nginx requires a **coordinated** three-part change (app bind host `0.0.0.0`→`127.0.0.1`, Service port `8091`→`80`, and updating `backend_v2`'s own `NEPBOOKS_INTEGRATION_SERVICE_URL` to match) — not yet done.
+- `back-office`, `website-v2`, `notification-service`, `brevo-integration-service` — not yet built for this cluster at all.
+- Real `orderlay.app` Cloudflare/ACM access — still pending from the senior; everything today runs on the borrowed `orderlay-test.agentcis.com` scratch domain.
+
+---
+
+*Companion reading (updated): `note/ORDERLAY_WORKER_NODE_AND_LAVINMQ_SETUP_SESSION_NOTES_2026-09-15.md` (full real-output transcript for §15.7-15.8 — worker node join and the entire LavinMQ user/permission saga), `note/ORDERLAY_TERRAFORM_BOOTSTRAP_IAM_AND_ASG_LIFECYCLE_NOTES.md` (server/IAM side — §11.5 of this addendum directly corrects an over-cautious reading of that note's `oidc_create` discussion), `note/ORDERLAY_ARGOCD_INSTALL_AND_APP_OF_APPS_NOTES.md` (the original ArgoCD-install run — its own §10 now carries a self-contained summary of the credential incident), `note/ORDERLAY_ARGOCD_APP_OF_APPS_CASCADE_DIAGRAM.html` (visual version of §4), `note/QUEUE_LAVINMQ_LEARNING_PATH_FOR_BEGINNERS_NOTES.md` (general queue/consumer/LavinMQ concepts, referenced throughout §14.2-14.3), `note/AGENTCIS_STAGING_VS_PRODUCTION_INFRA_NOTES.md` (the real agentcis Ingress/Gateway/subdomain conventions §14.4-14.7 were checked against).*
