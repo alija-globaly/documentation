@@ -1462,4 +1462,110 @@ Both pieces of evidence agreed: the code fix was correct, but had simply never b
 
 ---
 
-*Companion reading (updated): `note/ORDERLAY_WORKER_NODE_AND_LAVINMQ_SETUP_SESSION_NOTES_2026-09-15.md` (full real-output transcript for §15.7-15.8 — worker node join and the entire LavinMQ user/permission saga), `note/ORDERLAY_TERRAFORM_BOOTSTRAP_IAM_AND_ASG_LIFECYCLE_NOTES.md` (server/IAM side — §11.5 of this addendum directly corrects an over-cautious reading of that note's `oidc_create` discussion), `note/ORDERLAY_ARGOCD_INSTALL_AND_APP_OF_APPS_NOTES.md` (the original ArgoCD-install run — its own §10 now carries a self-contained summary of the credential incident), `note/ORDERLAY_ARGOCD_APP_OF_APPS_CASCADE_DIAGRAM.html` (visual version of §4), `note/QUEUE_LAVINMQ_LEARNING_PATH_FOR_BEGINNERS_NOTES.md` (general queue/consumer/LavinMQ concepts, referenced throughout §14.2-14.3), `note/AGENTCIS_STAGING_VS_PRODUCTION_INFRA_NOTES.md` (the real agentcis Ingress/Gateway/subdomain conventions §14.4-14.7 were checked against).*
+## 16. Session Addendum (2026-09-16): `backend_v2` GitHub Actions OIDC — Two Stacked Failures, Both Fixed, Live Proof of a Working Pipeline
+
+> **Context:** picks up from §12 (the `REPO_TOKEN`/repo-credential-secret fix). That token was retrieved from the K8s master (`kubectl get secret gitops-ansible-github-secret -n argocd -o jsonpath='{.data.password}' | base64 -d`) and added to orderlay's own GitHub Actions secrets. This addendum covers what happened *next*, when `orderlay/.github/workflows/nginx-k8s-backend_v2.yml` (the build-and-push-only pipeline flagged as a TODO back in §15.12) was actually run for the first time.
+
+### 16.1 Failure #1 — `Could not assume role with OIDC: The web identity token provided could not be validated`
+
+First run of the `Configure AWS Credentials` step (`aws-actions/configure-aws-credentials`, `role-to-assume: ${{ vars.AWS_GITHUB_ROLE_ARN }}`) failed immediately with this error — a token-*validation* failure, meaning AWS has no registered OIDC Identity Provider for the issuer at all (this fails before any trust-policy condition is even evaluated).
+
+Traced through `GH-infra-and-k8s-charts-central/terraform-iaac`:
+- The IAM **role** the workflow assumes (`orderlay-staging-github-actions-AWS-ECR-S3-IRSA-role`, from `github-policy-and-roles/iam-github-action-irsa-role.tf`) is created **unconditionally** — trust policy hardcodes `Federated = arn:aws:iam::<account>:oidc-provider/token.actions.githubusercontent.com`.
+- The OIDC **provider** resource that ARN actually points to (`identity-providers/github-openid.tf`, `aws_iam_openid_connect_provider.github_actions`) is only created by the `iam_identity_openid_create` module, gated in `main-template.tf:4` by `count = var.oidc_create ? 1 : 0`.
+- `project/orderlay/environment/staging/terraform.tfvars:44` has `oidc_create = false`. Production has `true`, but orderlay is staging-only right now and production has never been applied.
+- Net effect: the role existed and referenced the provider ARN, but the provider itself had never been created in orderlay's AWS account (`381491939487`) — exactly matching this error. This is the same gap the shared IAM policy's `AllowGithubOidcProvider` Sid was proactively future-proofed for (see the companion Terraform note) — proactive, but the actual provider had still never been created.
+- Also checked (ruled out as a contributing cause): `github_repositories` in that same tfvars correctly lists `GlobalyHub/orderlay` and `GlobalyHub/NepBooks` — not a repo-scoping problem.
+
+### 16.2 Decision: create the OIDC provider manually rather than via `terraform apply`
+
+Chose not to flip `oidc_create = true` and apply, to avoid touching Terraform state / any risk to the live servers while still mid-debug. Verified this would in fact have been safe regardless, by reading `main-template.tf` in full: `iam_identity_openid_create` is a fully standalone module block — no other module (`create_ec2_k8s_root_servers`, `create_launch_template`, `create_k8s_autoscaling_group_default`/`_other`, DNS, security groups) references it or its outputs, and none of them gate on `var.oidc_create`. Flipping the flag would only ever add the one provider resource — confirmed via that trace, not just assumed.
+
+**Trade-off accepted for going manual:** if `oidc_create` is ever flipped to `true` later and applied, Terraform will try to *create* a new provider at the same URL and AWS will reject it (`EntityAlreadyExists`), since only one OIDC provider per URL is allowed per account. Reconciling at that point requires:
+```bash
+terraform import module.iam_identity_openid_create[0].aws_iam_openid_connect_provider.github_actions \
+  arn:aws:iam::381491939487:oidc-provider/token.actions.githubusercontent.com
+```
+Until then, the plan is to just leave `oidc_create = false` indefinitely in staging tfvars, since the resource now exists outside Terraform's management.
+
+### 16.3 Manual creation, live in the AWS console
+
+IAM → Identity providers → Add provider. First attempt landed on the **SAML** option by default (asks for a "Provider name" + metadata XML — wrong type entirely for GitHub Actions). Corrected to:
+- Provider type: **OpenID Connect**
+- Provider URL: `https://token.actions.githubusercontent.com` → **Get thumbprint** (console fetches it live over TLS)
+- Audience: `sts.amazonaws.com`
+- **Add provider**
+
+Confirmed created: `token.actions.githubusercontent.com`, type OpenID Connect, in account `381491939487` (`alija-orderlay`), creation time September 16, 2026, 14:13 UTC+05:45. Audiences tab showed exactly one entry, `sts.amazonaws.com`, as expected.
+
+No role needed to be "assigned" to the provider itself (the "Assign role" button on the provider's detail page creates a *new* role from scratch) — the existing role's trust policy already hardcoded the matching provider ARN, so the trust relationship completed automatically the moment the provider existed.
+
+### 16.4 Failure #2 — `Not authorized to perform sts:AssumeRoleWithWebIdentity`
+
+Re-ran the workflow. Progress: the error changed from a token-*validation* failure to an *authorization* failure — meaning the provider is now correctly trusted and the token *is* being validated, but the assume-role call itself is being denied on a trust-policy-condition mismatch (or a wrong role reference).
+
+Checked `orderlay-staging-github-actions-AWS-ECR-S3-IRSA-role` → **Trust relationships** tab directly in the console. The policy was actually **already correct**:
+```json
+{
+  "Version": "2012-10-17",
+  "Statement": [{
+    "Effect": "Allow",
+    "Principal": { "Federated": "arn:aws:iam::381491939487:oidc-provider/token.actions.githubusercontent.com" },
+    "Action": "sts:AssumeRoleWithWebIdentity",
+    "Condition": {
+      "StringEquals": { "token.actions.githubusercontent.com:aud": "sts.amazonaws.com" },
+      "StringLike": { "token.actions.githubusercontent.com:sub": [
+        "repo:GlobalyHub/NepBooks:*",
+        "repo:GlobalyHub/orderlay:*"
+      ]}
+    }
+  }]
+}
+```
+Federated principal matched the just-created provider exactly; `aud`/`sub` conditions were both correct. This role (created September 10, before the provider existed) was never the problem — ruled out definitively rather than assumed.
+
+### 16.5 Actual root cause: wrong ARN in the GitHub Actions variable
+
+With the role itself cleared, the remaining candidate was the `AWS_GITHUB_ROLE_ARN` variable the workflow actually reads (`orderlay` repo → Settings → Environments → **Staging** → Variables). It was set to:
+```
+arn:aws:iam::381491939487:role/orderlay-staging-K8s-EC2-IRSA-role      ← wrong: the plain EC2 instance role, unrelated
+```
+instead of:
+```
+arn:aws:iam::381491939487:role/orderlay-staging-github-actions-AWS-ECR-S3-IRSA-role   ← correct
+```
+Root cause of *that* mistake, per the user: they don't currently have IAM console permissions to browse/list Roles (only exact-name lookups work with the current policy), so the ARN had been hand-typed/guessed rather than found and copied — and landed on a different, unrelated role that happened to share the `-IRSA-role` naming suffix (`orderlay-staging-K8s-EC2-IRSA-role`, the plain `ec2.amazonaws.com`-trusted instance role already documented as *not* real IRSA in §11.5/companion Terraform note).
+
+### 16.6 Fix applied and proven live
+
+Corrected the `AWS_GITHUB_ROLE_ARN` value to the right role ARN. Re-ran the workflow (`GlobalyHub/orderlay` → Actions → "K8s backend_v2 with nginx" → run `update #11`). Result, straight from the run log:
+```
+Assuming role with OIDC
+Authenticated as assumedRoleId AROAVRUVRBCPWYAY4RMKB:GitHub_to_AWS_via_FederatedOIDC
+```
+`Configure AWS Credentials` step: ✅ (1s). Immediately followed by `Login to Amazon ECR` succeeding too (`Logging into registry 381491939487.dkr.ecr.ap-south-1.amazonaws.com`). **The OIDC → AWS → ECR path for `backend_v2` is now fully working end-to-end**, from a cold zero-credential state at the start of this session.
+
+### 16.7 Follow-up: patched (locally, not yet live) the IAM-browse permission gap that caused the typo
+
+Since the root cause of §16.5 traced back to not being able to browse Roles/Policies in the console, added the missing actions to `AllowTerraformIAMManagement` in `/home/alija/Downloads/TerraformInfrastructurePolicy.json`:
+```
+iam:ListRoles, iam:GetRolePolicy, iam:ListRoleTags, iam:UpdateAssumeRolePolicy, iam:UpdateRole,
+iam:ListPolicies, iam:ListEntitiesForPolicy, iam:ListPolicyTags
+```
+(`iam:ListRoles`/`iam:ListPolicies` fix the actual browsing gap; `iam:UpdateAssumeRolePolicy`/`iam:UpdateRole` add the ability to edit trust policies going forward, since that's the "update the role/policy" half of what was asked for. The `AllowGithubOidcProvider` Sid already had full read/write on OIDC providers — no gap there.)
+
+**Not yet applied to AWS** — this was only an edit to the local file. Two things still need doing before it has any real effect:
+1. **File-identity mismatch to resolve first**: per the companion Terraform note, the *canonical* live policy is `/home/alija/TerraformInfrastructurePolicy.json` (no `Downloads/` prefix) — `~/Downloads/orderlay-terraform-deployer-policy.json` was previously flagged as an abandoned draft. Today's edit was made against yet a **third** path, `~/Downloads/TerraformInfrastructurePolicy.json` — same filename as the canonical one, but in `Downloads/`. Not yet confirmed whether this is a fresh copy of the live policy (safe to push) or has drifted from it. Diff against `/home/alija/TerraformInfrastructurePolicy.json` before pushing anything.
+2. **Push mechanism**: once confirmed correct, apply via AWS Console → IAM → Policies → find the policy → Permissions tab → Edit policy → JSON → paste → Save changes (creates + auto-activates a new version), or `aws iam create-policy-version --policy-arn <arn> --policy-document file://... --set-as-default`. If it hits the 5-version cap, delete an old non-default version first via the Policy versions tab.
+3. **Scope reminder**: this policy is shared — attached to both `alija-orderlay` (orderlay) and `new-devops-user` (agentcis). Pushing this update grants the new IAM-browse/edit permissions to both projects' deployer identities, not just orderlay's. Additive-only change (nothing removed), so low risk, but crosses project boundaries.
+
+### 16.8 Punch list going into the next session
+
+- Reconcile the two `TerraformInfrastructurePolicy.json` copies (§16.7.1) and actually push the new policy version to AWS — not done yet, console/CLI step only.
+- `oidc_create` stays `false` in orderlay staging tfvars indefinitely (§16.2) — the OIDC provider now lives outside Terraform's management; remember the `terraform import` step if this is ever revisited.
+- The two orphaned double-suffixed repo-credential Secrets from §11.9-§12.4 (`argocd-ansible-github-secret-github-secret`, `gitops-ansible-github-secret-github-secret`) are still sitting in the cluster, unrelated to today's fix but still on the original cleanup list.
+- Same OIDC-provider gap almost certainly exists for `web-v2`'s pipeline (`nginx-k8s-web-v2.yml`, added 2026-09-11 per §15) the moment its GitHub Actions variable is pointed at a real role ARN — already fixed at the AWS-account level today (the provider is account-wide, not per-workflow), so `web-v2` should not need this same OIDC-provider fix repeated, only its own `AWS_GITHUB_ROLE_ARN` value double-checked before first run.
+
+---
+
+*Companion reading (updated): `note/ORDERLAY_WORKER_NODE_AND_LAVINMQ_SETUP_SESSION_NOTES_2026-09-15.md` (full real-output transcript for §15.7-15.8 — worker node join and the entire LavinMQ user/permission saga), `note/ORDERLAY_TERRAFORM_BOOTSTRAP_IAM_AND_ASG_LIFECYCLE_NOTES.md` (server/IAM side — §11.5 of this addendum directly corrects an over-cautious reading of that note's `oidc_create` discussion; §16 above reuses and extends that same discussion), `note/ORDERLAY_ARGOCD_INSTALL_AND_APP_OF_APPS_NOTES.md` (the original ArgoCD-install run — its own §10 now carries a self-contained summary of the credential incident), `note/ORDERLAY_ARGOCD_APP_OF_APPS_CASCADE_DIAGRAM.html` (visual version of §4), `note/QUEUE_LAVINMQ_LEARNING_PATH_FOR_BEGINNERS_NOTES.md` (general queue/consumer/LavinMQ concepts, referenced throughout §14.2-14.3), `note/AGENTCIS_STAGING_VS_PRODUCTION_INFRA_NOTES.md` (the real agentcis Ingress/Gateway/subdomain conventions §14.4-14.7 were checked against).*
